@@ -10,6 +10,74 @@ use Carp qw( croak );
 
 our $VERSION = '0.001';
 
+=head1 SYNOPSIS
+
+    use IO::Async::Loop;
+    use Net::Async::MCP;
+    use Future::AsyncAwait;
+
+    my $loop = IO::Async::Loop->new;
+
+    # In-process transport (Perl MCP::Server in same process)
+    use MCP::Server;
+    my $server = MCP::Server->new(name => 'MyServer');
+    $server->tool(
+        name         => 'echo',
+        description  => 'Echo text',
+        input_schema => {
+            type       => 'object',
+            properties => { message => { type => 'string' } },
+            required   => ['message'],
+        },
+        code => sub { return "Echo: $_[1]->{message}" },
+    );
+
+    my $mcp = Net::Async::MCP->new(server => $server);
+    $loop->add($mcp);
+
+    # Stdio transport (external MCP server subprocess)
+    my $mcp = Net::Async::MCP->new(
+        command => ['npx', '@anthropic/mcp-server-web-search'],
+    );
+    $loop->add($mcp);
+
+    # All transports share the same async API:
+    async sub main {
+        await $mcp->initialize;
+
+        my $tools = await $mcp->list_tools;
+        # [{name => 'echo', description => '...', inputSchema => {...}}]
+
+        my $result = await $mcp->call_tool('echo', { message => 'Hello' });
+        # {content => [{type => 'text', text => 'Echo: Hello'}], isError => \0}
+
+        await $mcp->shutdown;
+    }
+
+    main()->get;
+
+=head1 DESCRIPTION
+
+L<Net::Async::MCP> is an asynchronous client for the MCP (Model Context
+Protocol) built on L<IO::Async>. It connects to MCP servers via pluggable
+transports:
+
+=over 4
+
+=item * B<InProcess> - Direct calls to an L<MCP::Server> instance in the same
+process. See L<Net::Async::MCP::Transport::InProcess>.
+
+=item * B<Stdio> - Subprocess communication over stdin/stdout using
+newline-delimited JSON-RPC. Works with any MCP server implementation (Perl,
+Node.js, Python, etc.). See L<Net::Async::MCP::Transport::Stdio>.
+
+=back
+
+All methods return L<Future> objects and work with L<Future::AsyncAwait>.
+Call L</initialize> first before using any other MCP methods.
+
+=cut
+
 sub _init {
   my ( $self, $params ) = @_;
   for my $key (qw( server command url )) {
@@ -63,7 +131,26 @@ sub _ensure_transport {
 
 sub server_info { $_[0]->{server_info} }
 
+=method server_info
+
+    my $info = $mcp->server_info;
+
+Returns the server info hashref from the MCP initialize response. Contains at
+minimum C<name> and C<version> keys. Only available after L</initialize> has
+been called.
+
+=cut
+
 sub server_capabilities { $_[0]->{server_capabilities} }
+
+=method server_capabilities
+
+    my $caps = $mcp->server_capabilities;
+
+Returns the server capabilities hashref from the MCP initialize response.
+Only available after L</initialize> has been called.
+
+=cut
 
 async sub initialize {
   my ( $self ) = @_;
@@ -87,11 +174,33 @@ async sub initialize {
   return $result;
 }
 
+=method initialize
+
+    my $result = await $mcp->initialize;
+
+Performs the MCP initialization handshake. Must be called before any other MCP
+method. Sends protocol version and client info, then receives server info and
+capabilities.
+
+Returns a hashref with C<serverInfo> and C<capabilities> keys. Also populates
+the L</server_info> and L</server_capabilities> accessors.
+
+=cut
+
 async sub list_tools {
   my ( $self ) = @_;
   my $result = await $self->{transport}->send_request('tools/list');
   return $result->{tools} // [];
 }
+
+=method list_tools
+
+    my $tools = await $mcp->list_tools;
+
+Returns an ArrayRef of tool definition hashrefs from the MCP server. Each
+hashref contains C<name>, C<description>, and C<inputSchema> keys.
+
+=cut
 
 async sub call_tool {
   my ( $self, $name, $arguments ) = @_;
@@ -102,11 +211,29 @@ async sub call_tool {
   return $result;
 }
 
+=method call_tool
+
+    my $result = await $mcp->call_tool($name, \%arguments);
+
+Calls a named tool on the MCP server with the given arguments hashref.
+Returns a hashref with C<content> (ArrayRef of content blocks) and C<isError>
+(boolean).
+
+=cut
+
 async sub list_prompts {
   my ( $self ) = @_;
   my $result = await $self->{transport}->send_request('prompts/list');
   return $result->{prompts} // [];
 }
+
+=method list_prompts
+
+    my $prompts = await $mcp->list_prompts;
+
+Returns an ArrayRef of prompt definition hashrefs from the MCP server.
+
+=cut
 
 async sub get_prompt {
   my ( $self, $name, $arguments ) = @_;
@@ -117,11 +244,28 @@ async sub get_prompt {
   return $result;
 }
 
+=method get_prompt
+
+    my $result = await $mcp->get_prompt($name, \%arguments);
+
+Retrieves a named prompt from the MCP server, optionally passing arguments.
+Returns the prompt result hashref.
+
+=cut
+
 async sub list_resources {
   my ( $self ) = @_;
   my $result = await $self->{transport}->send_request('resources/list');
   return $result->{resources} // [];
 }
+
+=method list_resources
+
+    my $resources = await $mcp->list_resources;
+
+Returns an ArrayRef of resource definition hashrefs from the MCP server.
+
+=cut
 
 async sub read_resource {
   my ( $self, $uri ) = @_;
@@ -131,11 +275,29 @@ async sub read_resource {
   return $result;
 }
 
+=method read_resource
+
+    my $result = await $mcp->read_resource($uri);
+
+Reads a resource by URI from the MCP server. Returns the resource content
+hashref.
+
+=cut
+
 async sub ping {
   my ( $self ) = @_;
   await $self->{transport}->send_request('ping');
   return 1;
 }
+
+=method ping
+
+    await $mcp->ping;
+
+Sends a ping request to verify the server is alive and responsive. Returns
+C<1> on success, fails the returned L<Future> if the server does not respond.
+
+=cut
 
 async sub shutdown {
   my ( $self ) = @_;
@@ -145,151 +307,32 @@ async sub shutdown {
   return 1;
 }
 
-1;
-
-=head1 SYNOPSIS
-
-  use IO::Async::Loop;
-  use Net::Async::MCP;
-  use Future::AsyncAwait;
-
-  my $loop = IO::Async::Loop->new;
-
-  # In-process (requires MCP module)
-  use MCP::Server;
-  my $server = MCP::Server->new(name => 'MyServer');
-  $server->tool(
-    name         => 'echo',
-    description  => 'Echo text',
-    input_schema => {
-      type       => 'object',
-      properties => { message => { type => 'string' } },
-      required   => ['message'],
-    },
-    code => sub { return "Echo: $_[1]->{message}" },
-  );
-
-  my $mcp = Net::Async::MCP->new(server => $server);
-  $loop->add($mcp);
-
-  # Stdio (external process)
-  my $mcp_stdio = Net::Async::MCP->new(
-    command => ['npx', '@anthropic/mcp-server-web-search'],
-  );
-  $loop->add($mcp_stdio);
-
-  # All transports, same async API:
-  async sub main {
-    await $mcp->initialize;
-
-    my $tools = await $mcp->list_tools;
-    # [{name => 'echo', description => '...', inputSchema => {...}}]
-
-    my $result = await $mcp->call_tool('echo', { message => 'Hello' });
-    # {content => [{type => 'text', text => 'Echo: Hello'}], isError => false}
+=method shutdown
 
     await $mcp->shutdown;
-  }
 
-  main()->get;
+Cleanly shuts down the MCP connection. For the Stdio transport this sends
+SIGTERM to the subprocess and waits for it to exit. For the InProcess
+transport this is a no-op.
 
-=head1 DESCRIPTION
+=cut
 
-L<Net::Async::MCP> is an asynchronous MCP (Model Context Protocol) client built
-on L<IO::Async>. It can connect to MCP servers via multiple transports:
+=seealso
 
 =over 4
 
-=item * B<InProcess> - Direct calls to an L<MCP::Server> instance in the same process
+=item * L<Net::Async::MCP::Transport::InProcess> - In-process transport for Perl MCP servers
 
-=item * B<Stdio> - Subprocess communication over stdin/stdout (JSON-RPC)
+=item * L<Net::Async::MCP::Transport::Stdio> - Subprocess transport via stdin/stdout
+
+=item * L<IO::Async::Notifier> - Base class
+
+=item * L<Future::AsyncAwait> - Async/await syntax used with this module
+
+=item * L<https://modelcontextprotocol.io> - MCP specification
 
 =back
 
-All methods return L<Future> objects and work with L<Future::AsyncAwait>.
-
-=attr server
-
-An L<MCP::Server> instance for in-process communication. When provided,
-the InProcess transport is used.
-
-=attr command
-
-An ArrayRef of command and arguments to spawn an MCP server subprocess.
-When provided, the Stdio transport is used.
-
-=method initialize
-
-  my $info = await $mcp->initialize;
-
-Sends the MCP initialize handshake. Must be called before any other MCP
-methods. Returns the server's initialization response containing
-C<serverInfo> and C<capabilities>.
-
-=method list_tools
-
-  my $tools = await $mcp->list_tools;
-
-Returns an ArrayRef of tool definitions from the MCP server.
-
-=method call_tool
-
-  my $result = await $mcp->call_tool($name, \%arguments);
-
-Calls a tool on the MCP server. Returns the tool result containing
-C<content> (ArrayRef of content blocks) and C<isError> (boolean).
-
-=method list_prompts
-
-  my $prompts = await $mcp->list_prompts;
-
-Returns an ArrayRef of prompt definitions.
-
-=method get_prompt
-
-  my $result = await $mcp->get_prompt($name, \%arguments);
-
-Gets a prompt from the MCP server with the given arguments.
-
-=method list_resources
-
-  my $resources = await $mcp->list_resources;
-
-Returns an ArrayRef of resource definitions.
-
-=method read_resource
-
-  my $result = await $mcp->read_resource($uri);
-
-Reads a resource from the MCP server by URI.
-
-=method ping
-
-  await $mcp->ping;
-
-Sends a ping to verify the server is responsive.
-
-=method shutdown
-
-  await $mcp->shutdown;
-
-Shuts down the connection. For Stdio transport, this terminates the
-subprocess.
-
-=method server_info
-
-  my $info = $mcp->server_info;
-
-Returns the server info hash from the initialize response. Available after
-L</initialize> has been called.
-
-=method server_capabilities
-
-  my $caps = $mcp->server_capabilities;
-
-Returns the server capabilities hash from the initialize response. Available
-after L</initialize> has been called.
-
-=seealso L<MCP>, L<IO::Async>, L<https://modelcontextprotocol.io>
-
 =cut
+
+1;

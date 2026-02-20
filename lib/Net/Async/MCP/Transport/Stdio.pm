@@ -9,6 +9,37 @@ use Future;
 use JSON::MaybeXS;
 use Carp qw( croak );
 
+=head1 SYNOPSIS
+
+    # Usually created automatically by Net::Async::MCP
+    use IO::Async::Loop;
+    use Net::Async::MCP;
+
+    my $loop = IO::Async::Loop->new;
+    my $mcp = Net::Async::MCP->new(
+        command => ['npx', '@anthropic/mcp-server-web-search'],
+    );
+    $loop->add($mcp);
+
+=head1 DESCRIPTION
+
+L<Net::Async::MCP::Transport::Stdio> communicates with an external MCP server
+process via stdin/stdout using newline-delimited JSON-RPC 2.0. The subprocess
+is managed as an L<IO::Async::Process> child notifier.
+
+This transport works with any MCP server that supports the stdio transport,
+regardless of implementation language (Perl, Node.js, Python, Go, etc.).
+
+Requests are matched to responses by their JSON-RPC C<id> field. Each pending
+request is represented by a L<Future> that resolves when the matching response
+arrives. If the subprocess exits unexpectedly, all pending futures are failed
+with an error message including the exit code.
+
+This transport is selected automatically by L<Net::Async::MCP> when constructed
+with a C<command> argument.
+
+=cut
+
 sub _init {
   my ( $self, $params ) = @_;
   $self->{command} = delete $params->{command}
@@ -85,6 +116,19 @@ sub send_request {
   return $future;
 }
 
+=method send_request
+
+    my $future = $transport->send_request($method, \%params);
+
+Encodes a JSON-RPC request and writes it as a newline-terminated JSON line to
+the subprocess stdin. Returns a L<Future> that resolves to the C<result> value
+when the matching response is read from stdout, or fails with an error if the
+server returns a JSON-RPC error or the process exits.
+
+Fails immediately if the subprocess has already exited.
+
+=cut
+
 sub send_notification {
   my ( $self, $method, $params ) = @_;
 
@@ -104,6 +148,17 @@ sub send_notification {
   return Future->done;
 }
 
+=method send_notification
+
+    my $future = $transport->send_notification($method, \%params);
+
+Encodes a JSON-RPC notification (no C<id> field, no response expected) and
+writes it to the subprocess stdin. Returns an immediately resolved L<Future>.
+
+Fails immediately if the subprocess has already exited.
+
+=cut
+
 sub close {
   my ( $self ) = @_;
   return Future->done if $self->{closed};
@@ -119,6 +174,16 @@ sub close {
 
   return Future->done;
 }
+
+=method close
+
+    my $future = $transport->close;
+
+Sends SIGTERM to the subprocess and returns a L<Future> that resolves when
+the process exits. If the process has already exited, returns an immediately
+resolved L<Future>.
+
+=cut
 
 sub _on_stdout_read {
   my ( $self, $buffref, $eof ) = @_;
@@ -163,46 +228,20 @@ sub _on_finish {
   }
 }
 
-1;
+=seealso
 
-=head1 SYNOPSIS
+=over 4
 
-  # Usually created automatically by Net::Async::MCP
-  use Net::Async::MCP;
-  my $mcp = Net::Async::MCP->new(
-    command => ['npx', '@anthropic/mcp-server-web-search'],
-  );
+=item * L<Net::Async::MCP> - Main client module that uses this transport
 
-=head1 DESCRIPTION
+=item * L<Net::Async::MCP::Transport::InProcess> - Alternative transport for in-process Perl servers
 
-L<Net::Async::MCP::Transport::Stdio> communicates with an external MCP
-server process via stdin/stdout using newline-delimited JSON-RPC. The
-subprocess is managed as an L<IO::Async::Process> child.
+=item * L<IO::Async::Process> - Subprocess management used internally
 
-This transport works with any MCP server that supports the stdio
-transport, regardless of implementation language (Perl, Node.js, Python,
-etc.).
+=item * L<IO::Async::Notifier> - Base class
 
-=method send_request
-
-  my $future = $transport->send_request($method, \%params);
-
-Sends a JSON-RPC request and returns a L<Future> that resolves when the
-server responds.
-
-=method send_notification
-
-  my $future = $transport->send_notification($method, \%params);
-
-Sends a JSON-RPC notification (no response expected).
-
-=method close
-
-  my $future = $transport->close;
-
-Sends SIGTERM to the subprocess and returns a L<Future> that resolves
-when the process exits.
-
-=seealso L<Net::Async::MCP>, L<IO::Async::Process>
+=back
 
 =cut
+
+1;

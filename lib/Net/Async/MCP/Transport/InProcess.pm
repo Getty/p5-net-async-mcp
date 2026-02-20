@@ -8,6 +8,38 @@ use Future;
 use Scalar::Util qw( blessed );
 use Carp qw( croak );
 
+=head1 SYNOPSIS
+
+    # Usually created automatically by Net::Async::MCP
+    use Net::Async::MCP;
+
+    my $mcp = Net::Async::MCP->new(server => $my_mcp_server);
+    $loop->add($mcp);
+
+    # Or construct directly for testing:
+    use Net::Async::MCP::Transport::InProcess;
+
+    my $transport = Net::Async::MCP::Transport::InProcess->new(
+        server => $my_mcp_server,
+    );
+
+=head1 DESCRIPTION
+
+L<Net::Async::MCP::Transport::InProcess> provides direct in-process
+communication with an L<MCP::Server> instance. It calls C<handle()>
+directly on the server object, making it the most efficient transport for
+Perl-based MCP servers running in the same process.
+
+If a tool returns a L<Mojo::Promise> (from an async MCP server
+implementation), the promise is resolved synchronously via C<wait()>. For
+fully non-blocking async tools, use L<Net::Async::MCP::Transport::Stdio>
+with a separate subprocess instead.
+
+This transport is selected automatically by L<Net::Async::MCP> when
+constructed with a C<server> argument.
+
+=cut
+
 sub new {
   my ( $class, %args ) = @_;
   croak "server is required" unless $args{server};
@@ -16,6 +48,18 @@ sub new {
     next_id => 0,
   }, $class;
 }
+
+=method new
+
+    my $transport = Net::Async::MCP::Transport::InProcess->new(
+        server => $mcp_server,
+    );
+
+Constructs a new in-process transport. Requires a C<server> argument which
+must be an L<MCP::Server> instance (or any object with a C<handle> method
+that accepts a JSON-RPC request hashref).
+
+=cut
 
 sub send_request {
   my ( $self, $method, $params ) = @_;
@@ -44,6 +88,16 @@ sub send_request {
   return $self->_process_response($response);
 }
 
+=method send_request
+
+    my $future = $transport->send_request($method, \%params);
+
+Sends a JSON-RPC request to the MCP server by calling C<handle()> directly.
+Returns a L<Future> that resolves to the C<result> value from the response,
+or fails with an error message if the server returns a JSON-RPC error.
+
+=cut
+
 sub send_notification {
   my ( $self, $method, $params ) = @_;
 
@@ -57,7 +111,26 @@ sub send_notification {
   return Future->done;
 }
 
+=method send_notification
+
+    my $future = $transport->send_notification($method, \%params);
+
+Sends a JSON-RPC notification (a request with no C<id>, expecting no
+response) directly to the server via C<handle()>. Returns an immediately
+resolved L<Future>.
+
+=cut
+
 sub close { Future->done }
+
+=method close
+
+    my $future = $transport->close;
+
+No-op for the in-process transport since there is no external process or
+connection to close. Returns an immediately resolved L<Future>.
+
+=cut
 
 sub _process_response {
   my ( $self, $response ) = @_;
@@ -73,44 +146,18 @@ sub _process_response {
   return Future->done($response->{result});
 }
 
-1;
+=seealso
 
-=head1 SYNOPSIS
+=over 4
 
-  # Usually created automatically by Net::Async::MCP
-  use Net::Async::MCP;
-  my $mcp = Net::Async::MCP->new(server => $my_mcp_server);
+=item * L<Net::Async::MCP> - Main client module that uses this transport
 
-=head1 DESCRIPTION
+=item * L<Net::Async::MCP::Transport::Stdio> - Alternative transport for external subprocesses
 
-L<Net::Async::MCP::Transport::InProcess> provides direct in-process
-communication with an L<MCP::Server> instance. It calls C<handle()>
-directly on the server object, making it the most efficient transport
-for Perl-based MCP servers.
+=item * L<MCP::Server> - The MCP server this transport communicates with
 
-If a tool returns a L<Mojo::Promise> (async MCP tool), the promise is
-resolved synchronously via C<wait()>. For non-blocking async tools,
-use the Stdio transport with a separate process instead.
-
-=method send_request
-
-  my $future = $transport->send_request($method, \%params);
-
-Sends a JSON-RPC request to the server and returns a L<Future> that
-resolves to the result.
-
-=method send_notification
-
-  my $future = $transport->send_notification($method, \%params);
-
-Sends a JSON-RPC notification (no response expected).
-
-=method close
-
-  my $future = $transport->close;
-
-No-op for InProcess transport. Returns a resolved L<Future>.
-
-=seealso L<Net::Async::MCP>, L<MCP::Server>
+=back
 
 =cut
+
+1;
