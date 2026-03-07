@@ -36,10 +36,16 @@ our $VERSION = '0.002';
     $loop->add($mcp);
 
     # Stdio transport (external MCP server subprocess)
-    my $mcp = Net::Async::MCP->new(
+    my $mcp_stdio = Net::Async::MCP->new(
         command => ['npx', '@anthropic/mcp-server-web-search'],
     );
-    $loop->add($mcp);
+    $loop->add($mcp_stdio);
+
+    # HTTP transport (remote MCP server)
+    my $mcp_http = Net::Async::MCP->new(
+        url => 'https://example.com/mcp',
+    );
+    $loop->add($mcp_http);
 
     # All transports share the same async API:
     async sub main {
@@ -70,6 +76,10 @@ process. See L<Net::Async::MCP::Transport::InProcess>.
 =item * B<Stdio> - Subprocess communication over stdin/stdout using
 newline-delimited JSON-RPC. Works with any MCP server implementation (Perl,
 Node.js, Python, etc.). See L<Net::Async::MCP::Transport::Stdio>.
+
+=item * B<HTTP> - Streamable HTTP transport for remote MCP servers. Supports
+both JSON and SSE responses, with automatic session management. See
+L<Net::Async::MCP::Transport::HTTP>.
 
 =back
 
@@ -122,7 +132,14 @@ sub _ensure_transport {
     $self->add_child($transport);
   }
   elsif ($self->{url}) {
-    croak "HTTP transport not yet implemented";
+    croak "HTTP transport requires being added to an IO::Async::Loop"
+      unless $self->loop;
+    require Net::Async::MCP::Transport::HTTP;
+    my $transport = Net::Async::MCP::Transport::HTTP->new(
+      url => $self->{url},
+    );
+    $self->{transport} = $transport;
+    $self->add_child($transport);
   }
   else {
     croak "Must provide server, command, or url";
@@ -324,6 +341,8 @@ transport this is a no-op.
 =item * L<Net::Async::MCP::Transport::InProcess> - In-process transport for Perl MCP servers
 
 =item * L<Net::Async::MCP::Transport::Stdio> - Subprocess transport via stdin/stdout
+
+=item * L<Net::Async::MCP::Transport::HTTP> - Streamable HTTP transport for remote servers
 
 =item * L<IO::Async::Notifier> - Base class
 
