@@ -1,6 +1,6 @@
 package Net::Async::MCP::Transport::Stdio;
 # ABSTRACT: Stdio MCP transport via subprocess JSON-RPC
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 use strict;
 use warnings;
 use parent 'IO::Async::Notifier';
