@@ -1,4 +1,4 @@
-{{$NEXT}}
+0.002     2026-03-07 05:14:23Z
   - Added HTTP transport for remote MCP servers (Streamable HTTP spec)
   - Improved .gitignore with proper directory patterns, tar.gz, cover_db,
     Carton, and editor backup entries
