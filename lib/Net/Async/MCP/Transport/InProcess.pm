@@ -5,6 +5,7 @@ use strict;
 use warnings;
 
 use Future;
+use MCP::Server::Context;
 use Scalar::Util qw( blessed );
 use Carp qw( croak );
 
@@ -27,8 +28,10 @@ use Carp qw( croak );
 
 L<Net::Async::MCP::Transport::InProcess> provides direct in-process
 communication with an L<MCP::Server> instance. It calls C<handle()>
-directly on the server object, making it the most efficient transport for
-Perl-based MCP servers running in the same process.
+directly on the server object, passing a fresh L<MCP::Server::Context> with
+each request, making it the most efficient transport for Perl-based MCP
+servers running in the same process. The context carries no scopes, so
+L<MCP::Server>'s OAuth scope checks impose no restriction for this transport.
 
 If a tool returns a L<Mojo::Promise> (from an async MCP server
 implementation), the promise is resolved synchronously via C<wait()>. For
@@ -57,7 +60,8 @@ sub new {
 
 Constructs a new in-process transport. Requires a C<server> argument which
 must be an L<MCP::Server> instance (or any object with a C<handle> method
-that accepts a JSON-RPC request hashref).
+that accepts a JSON-RPC request hashref and an L<MCP::Server::Context>
+instance).
 
 =cut
 
@@ -72,7 +76,7 @@ sub send_request {
     defined $params ? ( params => $params ) : (),
   };
 
-  my $response = $self->{server}->handle($request, {});
+  my $response = $self->{server}->handle($request, MCP::Server::Context->new);
 
   # Handle Mojo::Promise from async MCP tools
   if (blessed($response) && $response->isa('Mojo::Promise')) {
@@ -107,7 +111,7 @@ sub send_notification {
     defined $params ? ( params => $params ) : (),
   };
 
-  $self->{server}->handle($request, {});
+  $self->{server}->handle($request, MCP::Server::Context->new);
   return Future->done;
 }
 
@@ -155,6 +159,8 @@ sub _process_response {
 =item * L<Net::Async::MCP::Transport::Stdio> - Alternative transport for external subprocesses
 
 =item * L<MCP::Server> - The MCP server this transport communicates with
+
+=item * L<MCP::Server::Context> - Per-request context passed to C<handle()>
 
 =back
 

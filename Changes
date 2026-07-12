@@ -1,4 +1,8 @@
 {{$NEXT}}
+  - Fixed InProcess transport to pass a real MCP::Server::Context to
+    handle() instead of a plain hashref, restoring compatibility with
+    MCP::Server >= 0.10 (Context class) and >= 0.11 (OAuth scope checks),
+    which call methods like has_scope on the context for most requests
 
 0.002     2026-03-07 05:14:23Z
   - Added HTTP transport for remote MCP servers (Streamable HTTP spec)
