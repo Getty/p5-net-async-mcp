@@ -8,7 +8,7 @@ use parent 'IO::Async::Notifier';
 use Future::AsyncAwait;
 use Carp qw( croak );
 
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 
 =head1 SYNOPSIS
 
