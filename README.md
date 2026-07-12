@@ -79,7 +79,7 @@ cpanm Net::Async::MCP
 - [IO::Async](https://metacpan.org/pod/IO::Async) >= 0.78
 - [Future::AsyncAwait](https://metacpan.org/pod/Future::AsyncAwait) >= 0.66
 - [JSON::MaybeXS](https://metacpan.org/pod/JSON::MaybeXS)
-- [MCP](https://metacpan.org/pod/MCP) >= 0.07 (recommended, required for InProcess transport)
+- [MCP](https://metacpan.org/pod/MCP) >= 0.11 (recommended, required for InProcess transport)
 - [Net::Async::HTTP](https://metacpan.org/pod/Net::Async::HTTP) (recommended, required for HTTP transport)
 
 ## See also
