@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T22:24:57Z
+created: 2026-08-14T20:43:19Z
+id: 11
+priority: low
+started: 2026-08-14T20:44:34Z
+status: done
+tags:
+- inprocess
+title: 'InProcess: subscriptions/listen liefert ein Subscription-Objekt'
+updated: 2026-08-14T22:24:57Z
+---
+
+Hat das Server-Objekt einen notification-faehigen Transport, gibt MCP::Server::handle fuer subscriptions/listen ein MCP::Server::Subscription zurueck statt eines JSON-RPC-Hashes. _process_response prueft ref eq HASH und meldet "Invalid response from MCP server". Nur erreichbar, wenn jemand einen streaming-faehigen Transport an den In-Process-Server haengt - deshalb niedrig, aber die Fehlermeldung ist irrefuehrend.
