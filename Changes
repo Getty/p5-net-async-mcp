@@ -20,12 +20,34 @@
     rejected _meta with a 400, so a subscriptions/listen error came back as a
     bogus "session expired" (dropping the session ID with it) and -32602 hid
     behind the HTTP status line. A JSON-RPC error body now wins over the
-    status, and only a 404 without one expires the session
+    status
   - Fixed double UTF-8 decoding in the HTTP transport, which made every
     non-ASCII text/event-stream response fail to parse: bodies are now read as
     bytes, which is what the JSON decoder expects
   - Removed the unused _initialized flag; the current protocol revision is
     stateless, so there is no handshake state left worth tracking
+  - Removed the Mcp-Session-Id machinery from the HTTP transport: requests no
+    longer carry the header, responses are no longer scanned for it, and
+    shutdown no longer sends a DELETE to the endpoint, since close is now a
+    no-op. SEP-2567 removed protocol sessions and the header in revision
+    2026-07-28, the only revision this client speaks: a server must ignore the
+    header and neither mint nor echo a session ID, and answers DELETE with 405,
+    so none of it could still have an effect. A bare 404 is now reported as the
+    HTTP error it is instead of a made up expired session. Talking to a legacy
+    server that still wants the header is no longer possible through this
+    transport
+  - Fixed the HTTP transport being unusable against a conforming server of the
+    current revision: it sent nothing but Content-Type and Accept, while
+    2026-07-28 mirrors a request's metadata into HTTP headers so intermediaries
+    can route on it without parsing the body, and a server must reject a
+    missing or diverging one with -32020 (HEADER_MISMATCH). Every single
+    request came back as that error. POSTs now carry MCP-Protocol-Version,
+    Mcp-Method and, for tools/call, prompts/get and resources/read, Mcp-Name,
+    each derived from the request body so that header and body cannot drift
+    apart; values outside printable ASCII travel base64 encoded in the
+    =?base64?...?= sentinel. Known limitation: the Mcp-Param-* headers for tool
+    arguments annotated with x-mcp-header are still not sent, so a tools/call
+    that passes such an argument stays rejected
   - Raised the MCP prerequisite to 0.15, the release that added server/discover
     and made 2026-07-28 the only supported revision, since the handshake this
     client speaks cannot work against anything older

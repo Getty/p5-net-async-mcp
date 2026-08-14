@@ -78,8 +78,7 @@ newline-delimited JSON-RPC. Works with any MCP server implementation (Perl,
 Node.js, Python, etc.). See L<Net::Async::MCP::Transport::Stdio>.
 
 =item * B<HTTP> - Streamable HTTP transport for remote MCP servers. Supports
-both JSON and SSE responses, with automatic session management. See
-L<Net::Async::MCP::Transport::HTTP>.
+both JSON and SSE responses. See L<Net::Async::MCP::Transport::HTTP>.
 
 =back
 
@@ -419,8 +418,8 @@ async sub shutdown {
     await $mcp->shutdown;
 
 Cleanly shuts down the MCP connection. For the Stdio transport this sends
-SIGTERM to the subprocess and waits for it to exit. For the InProcess
-transport this is a no-op.
+SIGTERM to the subprocess and waits for it to exit. For the InProcess and HTTP
+transports this is a no-op: neither holds anything that outlives a request.
 
 =cut
 

@@ -2,6 +2,9 @@ use strict;
 use warnings;
 use Test2::V0;
 
+use MIME::Base64 qw( decode_base64 );
+use Encode qw( decode );
+
 use Net::Async::MCP::Transport::HTTP;
 
 # HTTP::Message reaches this distribution only through Net::Async::HTTP, which
@@ -30,6 +33,110 @@ sub response {
   ok($transport->is_alive, 'HTTP transport is always alive');
 }
 
+# Every POST mirrors the request metadata into headers so an intermediary can
+# route without parsing the body. MCP::Server::Transport::HTTP::_check_headers
+# compares them against the body and answers -32020 for anything missing or
+# diverging, so a wrong value here does not degrade the client, it fails every
+# single request.
+
+sub headers {
+  my ( $method, $params ) = @_;
+  return { $transport->_standard_headers($method, $params) };
+}
+
+# The header value the server compares is what comes back out of the sentinel
+sub decoded_name {
+  my ( $value ) = @_;
+  return $value unless $value =~ /^=\?base64\?(.*)\?=$/s;
+  return decode('UTF-8', decode_base64($1));
+}
+
+{
+  my $params = {
+    name      => 'get_weather',
+    arguments => { city => 'Berlin' },
+    _meta     => { 'io.modelcontextprotocol/protocolVersion' => '2026-07-28' },
+  };
+  my $h = headers('tools/call', $params);
+
+  is($h->{'Content-Type'}, 'application/json', 'the JSON content type survives');
+  is($h->{'Accept'}, 'application/json, text/event-stream',
+    'both response types are still accepted');
+  is($h->{'MCP-Protocol-Version'},
+    $params->{_meta}{'io.modelcontextprotocol/protocolVersion'},
+    'MCP-Protocol-Version comes from the body _meta, so it cannot diverge');
+  is($h->{'Mcp-Method'}, 'tools/call', 'Mcp-Method is the method being called');
+  is($h->{'Mcp-Name'}, $params->{name}, 'Mcp-Name is the tool name from the body');
+}
+
+# The name lives under a different key per method, and the server compares
+# against exactly that key
+{
+  my $prompt = headers('prompts/get', { name => 'greeting' });
+  is($prompt->{'Mcp-Name'}, 'greeting', 'prompts/get takes Mcp-Name from params.name');
+
+  my $resource = headers('resources/read', { uri => 'file:///etc/hosts' });
+  is($resource->{'Mcp-Name'}, 'file:///etc/hosts',
+    'resources/read takes Mcp-Name from params.uri');
+}
+
+# A method without a name parameter gets no Mcp-Name at all - an empty one
+# would claim the body said something it did not
+{
+  my $h = headers('tools/list', {
+    _meta => { 'io.modelcontextprotocol/protocolVersion' => '2026-07-28' },
+  });
+  is($h->{'Mcp-Method'}, 'tools/list', 'Mcp-Method is set for a listing method too');
+  ok(!exists $h->{'Mcp-Name'}, 'no Mcp-Name for a method without a name parameter');
+}
+
+# Header values are bytes, so anything outside printable ASCII travels base64
+# encoded in a sentinel the server knows how to undo
+{
+  my $name = "Wetter-\x{00dc}bersicht";
+  my $h = headers('tools/call', { name => $name });
+  is($h->{'Mcp-Name'}, '=?base64?V2V0dGVyLcOcYmVyc2ljaHQ=?=',
+    'a non-ASCII tool name is base64 encoded as UTF-8 bytes');
+  is(decoded_name($h->{'Mcp-Name'}), $name,
+    'and the server decodes it back to the name in the body');
+}
+
+{
+  my $name = "grep\tfiles";
+  my $h = headers('tools/call', { name => $name });
+  is($h->{'Mcp-Name'}, '=?base64?Z3JlcAlmaWxlcw==?=',
+    'a control character outside [\x20-\x7e] is base64 encoded as well');
+  is(decoded_name($h->{'Mcp-Name'}), $name,
+    'and decodes back to the name in the body');
+}
+
+# A name that already looks like the sentinel has to be encoded too, or the
+# server would decode a name the body never contained
+{
+  my $name = '=?base64?Zm9v?=';
+  my $h = headers('tools/call', { name => $name });
+  is($h->{'Mcp-Name'}, '=?base64?PT9iYXNlNjQ/Wm05dj89?=',
+    'a name shaped like the sentinel is encoded rather than passed through');
+  is(decoded_name($h->{'Mcp-Name'}), $name,
+    'and decodes back to the literal name, not to its inner value');
+}
+
+# Net::Async::MCP::initialize sends notifications/initialized without any
+# params. There is no protocol version to mirror then, and inventing one would
+# be worse than sending none
+{
+  my $h = headers('notifications/initialized', undef);
+  is($h->{'Mcp-Method'}, 'notifications/initialized',
+    'a notification without params still names its method');
+  ok(!exists $h->{'MCP-Protocol-Version'},
+    'no MCP-Protocol-Version header without params to take it from');
+
+  my $no_meta = headers('tools/list', {});
+  ok(!exists $no_meta->{'MCP-Protocol-Version'},
+    'nor with params that carry no _meta');
+  is($no_meta->{'Mcp-Method'}, 'tools/list', 'while Mcp-Method is there either way');
+}
+
 # MCP::Server renders a rejected _meta as -32602 with HTTP 400. Reporting the
 # status line instead would throw away the only useful part of the answer.
 {
@@ -40,24 +147,22 @@ sub response {
 }
 
 # MCP::Server answers an unknown method - subscriptions/listen on a server
-# without notification support, for one - with -32601 and HTTP 404. That is a
-# method error, not an expired session, and must not drop the session ID.
+# without notification support, for one - with -32601 and HTTP 404. The status
+# alone would say nothing about which method the server refused.
 {
-  $transport->{session_id} = 'session-alive';
   my $f = $transport->_handle_response(response(404, 'application/json',
     '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method \'subscriptions/listen\' not found"}}'));
   is($f->failure, "MCP error -32601: Method 'subscriptions/listen' not found",
     'HTTP 404 with a JSON-RPC error body surfaces the JSON-RPC error');
-  is($transport->{session_id}, 'session-alive',
-    'session id survives a 404 that carries a JSON-RPC error');
 }
 
-# A 404 that is not a JSON-RPC error really is a gone session
+# A bare 404 is nothing but a 404. The current revision has no protocol
+# sessions, so there is no expired session left to blame it on and the honest
+# report is the status line.
 {
-  $transport->{session_id} = 'session-gone';
   my $f = $transport->_handle_response(response(404, 'text/plain', 'Not Found'));
-  like($f->failure, qr/session expired/, 'bare HTTP 404 is an expired session');
-  is($transport->{session_id}, undef, 'expired session drops the session id');
+  like($f->failure, qr/^MCP HTTP error: 404/,
+    'bare HTTP 404 falls back to the HTTP status line');
 }
 
 # A JSON body with a plain string "error" is not a JSON-RPC error. MCP::Server
