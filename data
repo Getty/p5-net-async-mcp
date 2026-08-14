@@ -1,0 +1,18 @@
+---
+class: standard
+completed: 2026-08-14T22:59:17Z
+created: 2026-08-14T20:42:48Z
+depends_on:
+- 12
+id: 6
+priority: high
+started: 2026-08-14T22:43:20Z
+status: done
+tags:
+- protocol
+- api
+title: MRTR / InputRequiredResult unterstuetzen
+updated: 2026-08-14T22:59:17Z
+---
+
+Rev 2026-07-28 bettet Sampling, Elicitation und Roots als InputRequiredResult ins Ergebnis ein statt als Server-Requests (SEP-2322). Wir reichen das roh durch; der Aufrufer muesste resultType selbst erkennen und den Folge-Request mit inputResponses/requestState bauen. Braucht eine API-Entscheidung: Callback am Client, oder bewusst dem Aufrufer ueberlassen und nur dokumentieren. MCP::Client::_retry zeigt die Wire-Form.
