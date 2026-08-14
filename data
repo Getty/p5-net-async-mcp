@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T04:21:05Z
+created: 2026-08-14T04:16:26Z
+id: 3
+priority: low
+started: 2026-08-14T04:21:05Z
+status: done
+tags:
+- reconciliation
+title: Decide Net::Async::MCP ping() fate in current protocol
+updated: 2026-08-14T04:21:05Z
+---
+
+During karr #1 reconciliation (server/discover + _meta), found MCP::Server 0.15 / Rev-2026-07-28 dropped JSON-RPC ping (moved to transport level). Net::Async::MCP still exposes ping() sending 'ping' JSON-RPC; InProcess now fails with -32601 Method ping not found, and Stdio ping test only passes via accidental legacy-latch. Decide: keep ping() as transport-level no-op, remove it, or rework. See t/10_inprocess.t note and t/20_stdio.t.
