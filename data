@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-14T22:24:46Z
+created: 2026-08-14T20:43:00Z
+id: 8
+priority: medium
+started: 2026-08-14T20:44:40Z
+status: done
+tags:
+- stdio
+- protocol
+title: notifications/cancelled auf stdio
+updated: 2026-08-14T22:24:46Z
+---
+
+Es gibt keinen Weg, einen laufenden Request abzubrechen. Auf stdio ist notifications/cancelled die vorgesehene Form (auf HTTP ist es das Schliessen des Response-Streams). send_notification existiert auf dem Transport bereits, es fehlt die Anbindung an das pending-Future und eine oeffentliche Methode.
