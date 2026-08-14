@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-14T22:37:26Z
+created: 2026-08-14T20:46:39Z
+id: 12
+priority: high
+started: 2026-08-14T22:26:29Z
+status: done
+tags:
+- protocol
+- api
+title: clientCapabilities sind hart auf {} verdrahtet
+updated: 2026-08-14T22:37:26Z
+---
+
+Net::Async::MCP::_meta setzt io.modelcontextprotocol/clientCapabilities fix auf {}; ein Aufrufer kann keine Client-Faehigkeiten deklarieren. Das ist gleichzeitig der Grund, warum uns MRTR nur in seiner einfachen Form treffen kann: ein konformer Server DARF keine inputRequests schicken, die der Client nicht deklariert hat. Wer sampling oder elicitation anbieten will, braucht hier einen Weg rein. Vorbedingung fuer die volle Variante von #6.
