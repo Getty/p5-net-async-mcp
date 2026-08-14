@@ -1,0 +1,17 @@
+---
+class: standard
+completed: 2026-08-14T04:44:09Z
+created: 2026-08-14T03:27:30Z
+id: 2
+priority: low
+started: 2026-08-14T04:44:09Z
+status: done
+tags:
+- upstream
+- followup
+title: 'Follow-up: Upstream report + langertha revert'
+updated: 2026-08-14T04:44:09Z
+---
+
+Report Net::Async::MCP obsolete pre-_meta protocol upstream, watch for MCP::Server-side fix, then revert call sites in langertha to Net::Async::MCP. See ticket #1 and langertha commit 863ab31 / karr #60 and karr #63 for context.
+Abschluss: Der Net::Async::MCP-seitige Reco-Teil ist durch Ticket #1 erledigt (Client spricht jetzt server/discover + _meta); ein Upstream-Report ist nicht mehr noetig. Der langertha-Revert wird ausserhalb dieses Repos vom langertha-Agenten des Maintainers durchgefuehrt (dieser Agent arbeitet nur in p5-net-async-mcp). Kein Handlungsbedarf mehr hier.
