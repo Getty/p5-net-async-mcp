@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T23:16:14Z
+created: 2026-08-14T22:59:33Z
+id: 19
+priority: low
+started: 2026-08-14T23:00:10Z
+status: done
+tags:
+- api
+title: on_notification bekommt den Transport als erstes Argument, nicht den Client
+updated: 2026-08-14T23:16:14Z
+---
+
+Der Handler wird vom Client unveraendert an den Transport durchgereicht, also ruft ihn der Transport auf und uebergibt sich selbst. on_input_request bekommt dagegen den Client. Inkonsistent in derselben oeffentlichen API. Fix waere ein Wrapper im Client, der den Handler mit $self statt $transport aufruft - Designentscheidung, kein Bug. Im POD dokumentiert, solange es so ist.
