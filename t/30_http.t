@@ -3,7 +3,7 @@ use warnings;
 use Test2::V0;
 
 use MIME::Base64 qw( decode_base64 );
-use Encode qw( decode );
+use Encode qw( decode is_utf8 );
 use Future;
 use JSON::MaybeXS;
 
@@ -257,7 +257,21 @@ ok($transport->mirrors_header_params,
   sub do_request {
     my ( $self, %args ) = @_;
     push @{ $self->{requests} }, $args{request};
-    return Future->done($self->{responder}->($args{request}));
+
+    my $response = $self->{responder}->($args{request});
+
+    # Net::Async::HTTP hands the header over as soon as it has it and takes
+    # the callback for the body in return, calling it once more with nothing
+    # at the end of the body, where whatever it returns becomes the result of
+    # the Future. A redirect it consumes itself and never passes on.
+    my $on_header = $args{on_header};
+    return Future->done($response) if !$on_header || $response->is_redirect;
+
+    my $header = $response->clone;
+    $header->content('');
+    my $on_chunk = $on_header->($header);
+    $on_chunk->($response->content) if length $response->content;
+    return Future->done($on_chunk->());
   }
 
   sub requests { @{ $_[0]{requests} } }
@@ -532,6 +546,294 @@ sub sent_methods {
     HTTP::Response->new(500, 'Internal Server Error', [ 'Content-Type' => 'text/html' ], '<html>nope</html>'));
   like($f->failure, qr/^MCP HTTP error: 500/,
     'a non-2xx without a usable body fails with the HTTP status line');
+}
+
+# A server may send notifications on the response stream of a request long
+# before the response itself - the notifications/progress of a running
+# tools/call above all - and they are worth nothing once the call has
+# finished, so the stream has to be read as it arrives rather than in one
+# piece at the end. What Net::Async::HTTP feeds a body to is the callback
+# _sse_reader returns, so feeding it by hand is the whole stream, and where
+# one chunk ends and the next begins is the point of most of what follows.
+
+sub sse_reader {
+  my ( $notifications ) = @_;
+
+  my $t = Net::Async::MCP::Transport::HTTP->new(
+    url             => 'http://mcp.invalid/mcp',
+    on_notification => sub { push @$notifications, $_[1] },
+  );
+
+  return $t->_sse_reader;
+}
+
+sub sse_event {
+  my ( $payload ) = @_;
+  return "data: $payload\n\n";
+}
+
+my $PROGRESS = '{"jsonrpc":"2.0","method":"notifications/progress",'
+  . '"params":{"progressToken":"t","progress":1,"total":3}}';
+my $MESSAGE = '{"jsonrpc":"2.0","method":"notifications/message",'
+  . '"params":{"level":"info","data":"halfway"}}';
+my $RESULT = '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"done"}]}}';
+
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  $read->("event: message\n" . sse_event($PROGRESS));
+  is(scalar @got, 1,
+    'a notification reaches the handler as soon as its event is complete');
+  is($got[0]{method}, 'notifications/progress',
+    'and arrives as the decoded notification the server sent');
+  is($got[0]{params}{progress}, 1, 'with the params it carried');
+
+  $read->(sse_event($MESSAGE));
+  is([ map { $_->{method} } @got ],
+    [ 'notifications/progress', 'notifications/message' ],
+    'the next one follows it, in the order the server sent them');
+
+  $read->(sse_event($RESULT));
+  is(scalar @got, 2, 'while the response is no notification and is not handed over');
+
+  my $f = $read->();
+  ok($f->is_done, 'the finished stream resolves with the response it carried')
+    or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done', 'and the caller gets the result of it');
+}
+
+# The network decides where a chunk ends, not the server: every boundary at
+# once is the strongest form of the test, and any of them losing a byte turns
+# a delivered notification into a decode that quietly fails
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  $read->($_) for split //, sse_event($PROGRESS) . sse_event($RESULT);
+
+  is(scalar @got, 1, 'an event torn into single bytes is put back together');
+  is($got[0]{params}{total}, 3, 'with everything that was in it');
+
+  my $f = $read->();
+  ok($f->is_done, 'and so is the response behind it') or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done', 'with the result it carried');
+}
+
+# A server holds an idle stream open with comment lines, which are no events
+# at all, and may name fields this client has no use for. All of it over the
+# CRLF line endings an HTTP server writes rather than the bare LF a string
+# literal in a test does.
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  $read->(": keep-alive\r\n\r\n");
+  is(scalar @got, 0, 'a keep-alive comment is not delivered as a notification');
+
+  # A CRLF blank line has to end its event where it stands: an event that only
+  # ends when the stream does is a notification delivered too late to be worth
+  # anything, and the next event's data lines join onto it into one document
+  # that decodes as nothing at all
+  $read->("event: message\r\ndata: $PROGRESS\r\n\r\n");
+  is(scalar @got, 1, 'while a CRLF blank line ends its event there and then');
+
+  $read->("id: 42\r\n: another keep-alive\r\n");
+  $read->("data: $RESULT\r\n\r\n");
+
+  is(scalar @got, 1, 'and a field this client has no use for changes nothing');
+
+  my $f = $read->();
+  ok($f->is_done, 'and nothing about it stops the response from arriving')
+    or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done',
+    'which reads as it stands, CRLF line endings and all');
+}
+
+# The data lines of one event are one document, joined by newlines: a server
+# pretty-printing its JSON sends exactly this
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  $read->(qq(data: {"jsonrpc":"2.0","id":1,\ndata:  "result":{"text":"joined"}}\n\n));
+
+  my $f = $read->();
+  ok($f->is_done, 'the data lines of one event are joined into one document')
+    or diag $f->failure;
+  is($f->get->{text}, 'joined', 'and read as the one thing they are');
+}
+
+# A chunk ends between two bytes of a character as readily as between two
+# lines. Buffering characters instead of bytes would cut the multi-byte
+# sequence in half and lose the event to a decode that fails silently.
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  my $event = sse_event('{"jsonrpc":"2.0","method":"notifications/message",'
+    . qq("params":{"level":"info","data":"Gr\xc3\xbc\xc3\x9fe"}}));
+  my $cut = index($event, "\xc3\xbc") + 1;
+
+  $read->(substr($event, 0, $cut));
+  is(scalar @got, 0, 'nothing is delivered from half an event');
+
+  $read->(substr($event, $cut));
+  is(scalar @got, 1, 'an event cut inside a multi-byte character survives it');
+  is($got[0]{params}{data}, "Gr\x{00fc}\x{00df}e",
+    'and its text is decoded exactly once');
+}
+
+# Net::Async::HTTP hands over bytes, which is what the JSON decoder wants.
+# Characters would be read as UTF-8 a second time, and since a failed decode
+# is how a stream tolerates an event it cannot use, every non-ASCII event
+# would go missing without a word.
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  my $event = decode('UTF-8',
+    sse_event('{"jsonrpc":"2.0","method":"notifications/message",'
+      . qq("params":{"level":"info","data":"Gr\xc3\xbc\xc3\x9fe"}})));
+  ok(is_utf8($event), 'the chunk really is characters rather than bytes');
+
+  $read->($event);
+  is(scalar @got, 1, 'a chunk of characters is encoded back to bytes');
+  is($got[0]{params}{data}, "Gr\x{00fc}\x{00df}e", 'rather than lost to the decoder');
+}
+
+# A stream that ends without a response answered nothing, whatever else it
+# said on the way. (A subscriptions/listen looks exactly like this and is not
+# served by this at all - it needs a Future that never expects a response.)
+{
+  my @got;
+  my $read = sse_reader(\@got);
+
+  $read->(sse_event($PROGRESS));
+  my $f = $read->();
+
+  is($f->failure, 'MCP HTTP no JSON-RPC response in SSE stream',
+    'a stream that only ever notified never answered the request');
+  is(scalar @got, 1, 'though what it did send was delivered all the same');
+}
+
+# Nothing has to be listening. A server sends its notifications whether or not
+# this client asked for them, and one nobody wants is dropped rather than
+# turned into an error on a request that is otherwise going fine.
+{
+  my $read = $transport->_sse_reader;
+  my $f;
+
+  ok(lives {
+    $read->(sse_event($PROGRESS));
+    $f = $read->();
+  }, 'a notification with no handler for it is dropped') or note $@;
+
+  is($f->failure, 'MCP HTTP no JSON-RPC response in SSE stream',
+    'and changes nothing about what the stream did or did not answer');
+}
+
+# The reader only ever sees what Net::Async::HTTP gives it, so the wiring in
+# between - which body is read as it arrives and which is read whole - is its
+# own thing to get wrong.
+{
+  package Test::StreamingHTTP;
+
+  sub new {
+    my ( $class, %args ) = @_;
+    return bless { %args }, $class;
+  }
+
+  sub do_request {
+    my ( $self, %args ) = @_;
+
+    # A redirect is consumed by Net::Async::HTTP itself: it does not follow
+    # one for a POST, and the body reader never sees it
+    return Future->done($self->{response}) if $self->{response};
+
+    my $on_chunk = $args{on_header}->($self->{header});
+    $on_chunk->($_) for @{ $self->{chunks} };
+    return Future->done($on_chunk->());
+  }
+}
+
+sub streaming_transport {
+  my ( $notifications, %args ) = @_;
+
+  my $t = Net::Async::MCP::Transport::HTTP->new(
+    url             => 'http://mcp.invalid/mcp',
+    on_notification => sub { push @$notifications, $_[1] },
+  );
+  $t->{http} = Test::StreamingHTTP->new(%args);
+
+  return $t;
+}
+
+{
+  my @got;
+  my $t = streaming_transport(\@got,
+    header => HTTP::Response->new(200, 'OK',
+      [ 'Content-Type' => 'text/event-stream' ], ''),
+    chunks => [
+      "data: $PROGRESS\n",
+      "\ndata: " . substr($RESULT, 0, 20),
+      substr($RESULT, 20) . "\n\n",
+    ],
+  );
+
+  my $f = $t->send_request('tools/call', { name => 'slow' });
+  ok($f->is_done, 'a request answered with an event stream resolves with its response')
+    or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done', 'and hands the caller the result');
+  is([ map { $_->{method} } @got ], ['notifications/progress'],
+    'while the notification that came first reached the handler');
+}
+
+# The content type decides how a body is read, not the fact that it is read
+# through a callback: a JSON answer says nothing until it is complete and is
+# still judged whole, chunked or not.
+{
+  my @got;
+  my $t = streaming_transport(\@got,
+    header => HTTP::Response->new(200, 'OK',
+      [ 'Content-Type' => 'application/json' ], ''),
+    chunks => [ substr($RESULT, 0, 30), substr($RESULT, 30) ],
+  );
+
+  my $f = $t->send_request('tools/call', { name => 'quick' });
+  ok($f->is_done, 'a JSON body split across chunks is put back together')
+    or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done', 'and read as the whole response it is');
+  is(scalar @got, 0, 'with nothing to deliver on the way');
+}
+
+{
+  my @got;
+  my $t = streaming_transport(\@got,
+    header => HTTP::Response->new(404, 'Not Found',
+      [ 'Content-Type' => 'application/json' ], ''),
+    chunks => [ '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,',
+      '"message":"Method not found"}}' ],
+  );
+
+  my $f = $t->send_request('tools/call', { name => 'nope' });
+  is($f->failure, 'MCP error -32601: Method not found',
+    'and a JSON-RPC error still wins over the status it came with');
+}
+
+# Net::Async::HTTP resolves with the response object rather than with anything
+# a body reader returned when it consumed the body itself, which is what a
+# redirected endpoint looks like from here
+{
+  my @got;
+  my $t = streaming_transport(\@got,
+    response => HTTP::Response->new(302, 'Found',
+      [ Location => 'http://elsewhere.invalid/mcp' ], ''),
+  );
+
+  my $f = $t->send_request('tools/list', {});
+  like($f->failure, qr/^MCP HTTP error: 302/,
+    'a redirect that never reached the body reader is reported as the failure it is');
 }
 
 # Net::Async::HTTP applies no timeout unless it is given one, so a server that

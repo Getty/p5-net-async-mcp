@@ -7,8 +7,9 @@ use parent 'IO::Async::Notifier';
 use Future;
 use JSON::MaybeXS;
 use Carp qw( croak );
-use Encode qw( encode );
+use Encode qw( encode is_utf8 );
 use MIME::Base64 qw( encode_base64 );
+use Scalar::Util qw( blessed );
 
 =head1 SYNOPSIS
 
@@ -92,6 +93,8 @@ sub configure {
     $self->{url} = delete $params{url};
   }
   $self->{headers} = delete $params{headers} if exists $params{headers};
+  $self->{on_notification} = delete $params{on_notification}
+    if exists $params{on_notification};
   for my $key (qw( timeout stall_timeout )) {
     next unless exists $params{$key};
     $self->{$key} = delete $params{$key};
@@ -176,9 +179,20 @@ sub send_request {
     $body,
   );
 
-  return $self->{http}->do_request(request => $http_req)->then(sub {
-    my ( $response ) = @_;
-    return $self->_handle_response($response);
+  return $self->{http}->do_request(
+    request   => $http_req,
+    on_header => sub { $self->_response_reader(@_) },
+  )->then(sub {
+    my ( $outcome ) = @_;
+
+    # Both body readers end in the Future for the JSON-RPC outcome, and
+    # Net::Async::HTTP passes whatever they return through as the result of
+    # its own. A response object instead means the body never reached them:
+    # a redirect, which it consumes itself rather than handing over - it does
+    # not follow one for a POST, so this is where a redirected endpoint ends
+    # up, and the status line is all there is to report.
+    return $outcome if blessed($outcome) && $outcome->isa('Future');
+    return $self->_handle_response($outcome);
   });
 }
 
@@ -203,6 +217,16 @@ input schema - and this transport only encodes it for the wire.
 Returns a L<Future> that resolves to the C<result> value from the JSON-RPC
 response. Handles both C<application/json> and C<text/event-stream> response
 content types.
+
+An C<application/json> answer is read whole, as there is nothing to read
+before it is complete. A C<text/event-stream> is read as it arrives instead,
+because a server may send C<notifications/progress> and
+C<notifications/message> on the stream of a long running request before the
+response it answers with: an event carrying no C<id> is such a notification
+and is delivered to L</on_notification> the moment it lands, an event with an
+C<id> and a C<result> or C<error> is the response and settles the L<Future>. A
+stream that ends without one fails it with C<MCP HTTP no JSON-RPC response in
+SSE stream>.
 
 If the server answers with a non-2xx status, a JSON-RPC error in the body wins
 over the status: MCP servers render errors such as C<METHOD_NOT_FOUND> with a
@@ -301,6 +325,147 @@ does not know the schema yet. The other transports answer false and are spared
 that request.
 
 =cut
+
+=attr on_notification
+
+    my $transport = Net::Async::MCP::Transport::HTTP->new(
+        url             => 'https://example.com/mcp',
+        on_notification => sub {
+            my ( $transport, $notification ) = @_;
+            warn "$notification->{method}\n";
+        },
+    );
+
+Invoked for every server-initiated notification that arrives on the response
+stream of a request, with the decoded JSON-RPC notification as it stood on the
+wire - C<method> and, where the notification has any, C<params>. The
+C<notifications/progress> of a running C<tools/call> is what a caller usually
+waits for here, and it is only worth anything while the call is still running,
+which is why it is an event and not part of the L<Future> the call resolves
+with.
+
+Set through C<new> or C<configure> like any L<IO::Async::Notifier> event, or
+by a subclass implementing a method of this name. Notifications are dropped
+while nothing handles them: a server sends them whether or not this client
+asked, and there is nothing sensible to do with one no caller wants.
+
+=cut
+
+# Net::Async::HTTP hands the response header over as soon as it has it and
+# takes the callback for the body in return, so this is where the content type
+# decides how the body is read: an event stream carries notifications the
+# server sends before its response and has to be read as it arrives, while
+# every other body says nothing until it is complete and is judged whole.
+sub _response_reader {
+  my ( $self, $header ) = @_;
+
+  return $self->_sse_reader
+    if $header->is_success
+    && ($header->content_type // '') =~ m{^text/event-stream}i;
+
+  return sub {
+    return $header->add_content(@_) if @_;
+    return $self->_handle_response($header);
+  };
+}
+
+# Reads an SSE body as it arrives. Returns the callback Net::Async::HTTP feeds
+# the body to: once per chunk of bytes as it lands, and once with no arguments
+# at the end of the stream, where whatever it returns becomes the result of the
+# request's Future - here the Future the JSON-RPC outcome is reported through.
+#
+# A chunk ends wherever the network put it, mid-line and mid-character
+# included, so nothing leaves the buffer before its newline has arrived and
+# nothing is decoded before its event is complete.
+sub _sse_reader {
+  my ( $self ) = @_;
+
+  my $buffer = '';
+  my @data;
+  my $response;
+
+  # One line of the stream, its newline already taken off. A blank line ends
+  # an event, a line opening with a colon is a comment - the shape of the
+  # keep-alives a server sends to hold an idle stream open - and every other
+  # line is a field, of which this client reads only "data".
+  my $line = sub {
+    my ( $text ) = @_;
+
+    $text =~ s/\r\z//;
+
+    if (length $text) {
+      return if $text =~ /^:/;
+      my ( $field, $value ) = split /:/, $text, 2;
+      return unless defined $field && $field eq 'data';
+      $value = '' unless defined $value;
+      $value =~ s/^ //;
+      push @data, $value;
+      return;
+    }
+
+    my $event = join "\n", @data;
+    @data = ();
+    return unless length $event;
+
+    # Not every event is JSON-RPC this client can use, and one that is not is
+    # no reason to abandon a stream that still owes it a response.
+    my $decoded = eval { $self->{json}->decode($event) };
+    return unless ref $decoded eq 'HASH';
+
+    # An event that answers no request is a notification. One that does keeps
+    # the first response it carries: a stream holds the answer to exactly one
+    # request, and what comes after cannot make an earlier answer untrue. An
+    # id without a result or an error is a server-initiated request, which
+    # this client does not answer, so it is dropped.
+    return $self->maybe_invoke_event(on_notification => $decoded)
+      unless exists $decoded->{id};
+
+    $response = $decoded
+      if !$response && (exists $decoded->{result} || exists $decoded->{error});
+
+    return;
+  };
+
+  return sub {
+    unless (@_) {
+      # The end of the stream terminates whatever it interrupted: a server
+      # that closed right behind its last data line still said it.
+      $line->($buffer) if length $buffer;
+      $buffer = '';
+      $line->('');
+      return $self->_sse_result($response);
+    }
+
+    my ( $chunk ) = @_;
+    return unless defined $chunk;
+
+    # The JSON decoder has utf8 => 1 and wants bytes, which is what
+    # Net::Async::HTTP hands over. Characters would be decoded a second time
+    # and every non-ASCII event lost to the failed decode above.
+    $chunk = encode('UTF-8', $chunk) if is_utf8($chunk);
+
+    $buffer .= $chunk;
+    $line->($1) while $buffer =~ s/^([^\n]*)\n//;
+
+    return;
+  };
+}
+
+# The outcome of a finished SSE stream: the response event it carried, or the
+# failure of a stream that ended without one.
+sub _sse_result {
+  my ( $self, $data ) = @_;
+
+  return Future->fail("MCP HTTP no JSON-RPC response in SSE stream")
+    unless $data;
+
+  if (defined(my $err = $data->{error})) {
+    return Future->fail($self->_jsonrpc_error_message($data)
+      // $self->_foreign_error_message($err));
+  }
+
+  return Future->done($data->{result});
+}
 
 # The metadata headers every POST carries. They are read back out of the body
 # instead of out of transport state so that the two cannot drift apart: the
@@ -481,32 +646,15 @@ sub _handle_json_response {
   return Future->done($data->{result});
 }
 
+# A whole SSE body in hand rather than a stream to read from, which is the
+# same events through the same reader, all at once. Only a caller holding a
+# complete response gets here: a streamed one is read by _sse_reader itself.
 sub _handle_sse_response {
   my ( $self, $body ) = @_;
 
-  # Parse SSE events, find the JSON-RPC response
-  my $last_data;
-  for my $line (split /\n/, $body) {
-    if ($line =~ /^data:\s*(.+)/) {
-      my $data_str = $1;
-      my $data = eval { $self->{json}->decode($data_str) };
-      next unless $data && ref $data eq 'HASH';
-      # Look for a JSON-RPC response (has id and result/error)
-      if (exists $data->{id} && (exists $data->{result} || exists $data->{error})) {
-        $last_data = $data;
-      }
-    }
-  }
-
-  return Future->fail("MCP HTTP no JSON-RPC response in SSE stream")
-    unless $last_data;
-
-  if (defined(my $err = $last_data->{error})) {
-    return Future->fail($self->_jsonrpc_error_message($last_data)
-      // $self->_foreign_error_message($err));
-  }
-
-  return Future->done($last_data->{result});
+  my $read = $self->_sse_reader;
+  $read->($body);
+  return $read->();
 }
 
 =seealso

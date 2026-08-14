@@ -10,6 +10,16 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Fixed the HTTP transport throwing away everything a server sends before
+    its answer. An SSE response was read to the end and only then parsed, and
+    the parser kept the one event that looked like the response, so the
+    notifications/progress and notifications/message a server may emit during a
+    long tools/call were discarded unseen. The body is now parsed as it
+    arrives, and a notification is delivered to the new on_notification event
+    handler on the transport. Non-JSON-RPC events, keep-alive comments and an
+    event torn across chunk boundaries - including in the middle of a
+    multi-byte character - are handled where the old whole-body parser either
+    could not see them or had no chance to get them wrong
   - Fixed the Stdio transport never being reclaimed. The stdout on_read and
     on_finish callbacks captured the transport strongly and live on the child
     streams of the IO::Async::Process the transport itself owns, closing a
