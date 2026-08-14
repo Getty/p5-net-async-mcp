@@ -43,6 +43,19 @@ $loop->add($mcp);
 # The client speaks the current protocol revision by default
 is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol version');
 
+# Reconfiguring with an undefined protocol version must fall back to the
+# default instead of blanking the client: every request carries
+# protocolVersion in _meta, and MCP::Server answers a missing one with -32602.
+{
+  $mcp->configure(protocol_version => undef);
+  is($mcp->protocol_version, PROTOCOL_VERSION,
+    'undef protocol_version falls back to the default');
+
+  my $f = $mcp->list_tools;
+  ok(!$f->failure, 'a request after configure still carries a usable protocol version')
+    or diag $f->failure;
+}
+
 # Test initialize (current protocol: server/discover + _meta)
 {
   my $result = $mcp->initialize->get;
@@ -114,6 +127,33 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   my $f = $mcp->subscriptions_listen({ toolsListChanged => 1 });
   ok($f->failure, 'subscriptions_listen fails on a server without notification transport');
   like($f->failure, qr/not found/i, 'failure is JSON-RPC METHOD_NOT_FOUND');
+}
+
+# A server whose discover result carries no _meta at all. MCP::Server always
+# sends one, so this needs a stub, but a foreign server may not: server_info
+# must then default to {} without the client mutating the result it hands back
+# to the caller.
+{
+  package Test::NoMetaServer;
+  sub new { bless {}, shift }
+  sub handle {
+    my ( $self, $request ) = @_;
+    return undef unless defined $request->{id};
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => { capabilities => {} },
+    };
+  }
+}
+
+{
+  my $bare = Net::Async::MCP->new(server => Test::NoMetaServer->new);
+  $loop->add($bare);
+
+  my $result = $bare->initialize->get;
+  is($bare->server_info, {}, 'server_info defaults to {} when the result has no _meta');
+  ok(!exists $result->{_meta}, 'initialize does not autovivify _meta into the result');
 }
 
 done_testing;

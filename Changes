@@ -1,4 +1,40 @@
 {{$NEXT}}
+  - Fixed configure(protocol_version => undef) leaving the client without any
+    protocol version: the fallback was guarded by a check against an already
+    emptied hash and so never ran, after which every request carried a null
+    protocolVersion in _meta and MCP::Server answered -32602
+  - Fixed ping claiming liveness it had not checked. It now asks the transport
+    via the new is_alive method and fails the Future when the transport can no
+    longer carry requests, instead of always returning success
+  - Added is_alive to all three transports: false for Stdio once the subprocess
+    has exited or been closed, always true for InProcess and HTTP, which hold
+    no connection state between requests
+  - Fixed initialize autovivifying an empty _meta hash into the result it hands
+    back to the caller when the server sends none
+  - Fixed initialize still passing a top-level capabilities parameter left over
+    from the old handshake: server/discover ignores params entirely and the
+    client capabilities already travel in _meta, so it only put a second truth
+    on the wire
+  - Fixed the HTTP transport swallowing JSON-RPC errors that arrive with a
+    non-2xx status. MCP servers render METHOD_NOT_FOUND with a 404 and a
+    rejected _meta with a 400, so a subscriptions/listen error came back as a
+    bogus "session expired" (dropping the session ID with it) and -32602 hid
+    behind the HTTP status line. A JSON-RPC error body now wins over the
+    status, and only a 404 without one expires the session
+  - Fixed double UTF-8 decoding in the HTTP transport, which made every
+    non-ASCII text/event-stream response fail to parse: bodies are now read as
+    bytes, which is what the JSON decoder expects
+  - Removed the unused _initialized flag; the current protocol revision is
+    stateless, so there is no handshake state left worth tracking
+  - Raised the MCP prerequisite to 0.15, the release that added server/discover
+    and made 2026-07-28 the only supported revision, since the handshake this
+    client speaks cannot work against anything older
+  - Added HTTP::Message to the recommended prerequisites: the HTTP transport
+    requires HTTP::Request at runtime and so far only got it by accident
+    through Net::Async::HTTP, which is itself only a recommendation. Its tests
+    now skip rather than die when it is missing
+  - Fixed the HTTP transport documentation still naming protocol revision
+    2025-11-25 while its own seealso link pointed at 2026-07-28
   - Added subscriptions_listen client method for the subscriptions/listen
     request, completing the set of current-revision client methods
     (list_tools/call_tool, list_prompts/get_prompt, list_resources/read_resource,

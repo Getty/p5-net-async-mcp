@@ -72,4 +72,12 @@ $loop->add($mcp);
   ok($ok, 'shutdown succeeds');
 }
 
+# ping is a transport-level liveness check, so once the subprocess is gone it
+# must report that instead of claiming the server is still reachable.
+{
+  my $f = $mcp->ping;
+  ok($f->failure, 'ping fails after the subprocess has exited');
+  like($f->failure, qr/not alive/, 'failure names a dead transport');
+}
+
 done_testing;

@@ -100,7 +100,6 @@ sub _init {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
   $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
-  $self->{_initialized} = 0;
   $self->SUPER::_init($params);
 }
 
@@ -109,7 +108,7 @@ sub configure {
   for my $key (qw( server command url protocol_version )) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
-  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION if exists $params{protocol_version};
+  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
   $self->SUPER::configure(%params);
 }
 
@@ -172,9 +171,9 @@ L<MCP::Server>. Sent on every request inside C<_meta>.
 sub _meta {
   my ( $self ) = @_;
   return {
-    'io.modelcontextprotocol/protocolVersion'     => $self->{protocol_version},
+    'io.modelcontextprotocol/protocolVersion'    => $self->{protocol_version},
     'io.modelcontextprotocol/clientCapabilities' => {},
-    'io.modelcontextprotocol/clientInfo'          => {
+    'io.modelcontextprotocol/clientInfo'         => {
       name    => 'Net::Async::MCP',
       version => $VERSION,
     },
@@ -218,12 +217,12 @@ async sub initialize {
   $self->_ensure_transport;
 
   my $result = await $self->{transport}->send_request('server/discover',
-    $self->_with_meta({ capabilities => {} }));
+    $self->_with_meta);
 
-  $self->{server_info}
-    = $result->{_meta}{'io.modelcontextprotocol/serverInfo'} // {};
+  # Read without autovivifying an _meta key into the result we hand back.
+  my $meta = $result->{_meta} // {};
+  $self->{server_info} = $meta->{'io.modelcontextprotocol/serverInfo'} // {};
   $self->{server_capabilities} = $result->{capabilities} // {};
-  $self->{_initialized} = 1;
 
   await $self->{transport}->send_notification('notifications/initialized');
 
@@ -383,9 +382,10 @@ async sub ping {
   # The current MCP revision moved liveness to the transport level and has no
   # client-addressable JSON-RPC "ping" request. Sending one would fail against
   # MCP::Server >= 0.15 (InProcess errors with -32601); stdio only "succeeded"
-  # via an accidental legacy latch. Keep a transport-level liveness check that
-  # returns success while the transport is fully set up.
+  # via an accidental legacy latch. Ask the transport whether it is still
+  # usable instead of reporting success unconditionally.
   $self->_ensure_transport;
+  croak "MCP transport is not alive" unless $self->{transport}->is_alive;
   return 1;
 }
 
@@ -393,11 +393,16 @@ async sub ping {
 
     await $mcp->ping;
 
-Performs a transport-level liveness check. The current MCP revision moved
-liveness to the transport layer and has no client-addressable JSON-RPC
-C<ping> request, so this is a no-op that returns C<1> once the transport is
-set up, rather than sending a C<ping> that would fail against
-L<MCP::Server> E<gt>= 0.15.
+Performs a transport-level liveness check and returns C<1>. The current MCP
+revision moved liveness to the transport layer and has no client-addressable
+JSON-RPC C<ping> request, so no request goes on the wire; sending one would
+fail against L<MCP::Server> E<gt>= 0.15.
+
+Instead the transport's C<is_alive> is consulted, and the returned L<Future>
+fails if the transport can no longer carry requests: for
+L<Net::Async::MCP::Transport::Stdio> that means the subprocess has exited,
+while the InProcess and HTTP transports have no connection state and are
+always alive.
 
 =cut
 

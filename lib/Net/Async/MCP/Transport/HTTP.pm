@@ -24,7 +24,7 @@ use Carp qw( croak );
 
 L<Net::Async::MCP::Transport::HTTP> communicates with a remote MCP server
 over HTTP using the Streamable HTTP transport defined in the MCP specification
-(2025-11-25). Requests are sent as HTTP POST with JSON-RPC bodies, and
+(2026-07-28). Requests are sent as HTTP POST with JSON-RPC bodies, and
 responses may arrive as either C<application/json> or C<text/event-stream>
 (Server-Sent Events).
 
@@ -114,8 +114,12 @@ Returns a L<Future> that resolves to the C<result> value from the JSON-RPC
 response. Handles both C<application/json> and C<text/event-stream> response
 content types.
 
-If the server returns HTTP 404, this indicates an expired session. The future
-will fail with an appropriate error message.
+If the server answers with a non-2xx status, a JSON-RPC error in the body wins
+over the status: MCP servers render errors such as C<METHOD_NOT_FOUND> with a
+404 and a rejected C<_meta> with a 400, so the future fails with that
+C<MCP error $code: $message>. A 404 without a JSON-RPC error body is treated as
+an expired session and drops the stored session ID; any other status without a
+JSON-RPC error body fails with the HTTP status line.
 
 =cut
 
@@ -191,17 +195,38 @@ an immediately resolved L<Future>.
 
 =cut
 
+sub is_alive { 1 }
+
+=method is_alive
+
+    my $alive = $transport->is_alive;
+
+Always true: the transport holds no connection between requests, so a dead
+endpoint only shows up when a request is actually made. Used by
+L<Net::Async::MCP/ping> for its transport-level liveness check.
+
+=cut
+
 sub _handle_response {
   my ( $self, $response ) = @_;
 
   my $status = $response->code;
 
-  if ($status == 404) {
-    $self->{session_id} = undef;
-    return Future->fail("MCP session expired (HTTP 404)");
-  }
-
   unless ($response->is_success) {
+    # An MCP server renders JSON-RPC errors with a non-2xx status taken from
+    # the request context (400 for a rejected _meta, 403 for insufficient
+    # scope, 404 for METHOD_NOT_FOUND), so the body carries the real error and
+    # must win over the HTTP status. Only a non-2xx without a JSON-RPC error
+    # body is an HTTP-level problem.
+    if (my $error = $self->_jsonrpc_error_from_body($response)) {
+      return Future->fail($error);
+    }
+
+    if ($status == 404) {
+      $self->{session_id} = undef;
+      return Future->fail("MCP session expired (HTTP 404)");
+    }
+
     return Future->fail("MCP HTTP error: " . $response->status_line);
   }
 
@@ -213,11 +238,14 @@ sub _handle_response {
 
   my $content_type = $response->content_type // '';
 
+  # charset => 'none' undoes Content-Encoding but leaves the body as UTF-8
+  # bytes, which is what the JSON decoder below expects; letting
+  # decoded_content apply the charset too would decode text/event-stream twice.
   if ($content_type =~ m{^application/json}i) {
-    return $self->_handle_json_response($response->decoded_content);
+    return $self->_handle_json_response($response->decoded_content(charset => 'none'));
   }
   elsif ($content_type =~ m{^text/event-stream}i) {
-    return $self->_handle_sse_response($response->decoded_content);
+    return $self->_handle_sse_response($response->decoded_content(charset => 'none'));
   }
 
   # 202 Accepted with no body (for notifications/responses)
@@ -226,6 +254,24 @@ sub _handle_response {
   }
 
   return Future->fail("MCP HTTP unexpected content-type: $content_type");
+}
+
+sub _jsonrpc_error_from_body {
+  my ( $self, $response ) = @_;
+
+  my $body = eval { $response->decoded_content(charset => 'none') };
+  return undef unless defined $body && length $body;
+
+  my $data = eval { $self->{json}->decode($body) };
+  return undef unless ref $data eq 'HASH';
+
+  # Not every JSON error body is a JSON-RPC one: an MCP server answers a bad
+  # method with {error => 'Method not allowed'}, and a gateway in between may
+  # invent its own shape.
+  my $err = $data->{error};
+  return undef unless ref $err eq 'HASH' && defined $err->{code};
+
+  return "MCP error $err->{code}: $err->{message}";
 }
 
 sub _handle_json_response {

@@ -135,6 +135,18 @@ connection to close. Returns an immediately resolved L<Future>.
 
 =cut
 
+sub is_alive { 1 }
+
+=method is_alive
+
+    my $alive = $transport->is_alive;
+
+Always true: the server object lives in the same process, so there is no
+connection state that could go away. Used by L<Net::Async::MCP/ping> for its
+transport-level liveness check.
+
+=cut
+
 sub _process_response {
   my ( $self, $response ) = @_;
 

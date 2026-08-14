@@ -184,6 +184,18 @@ resolved L<Future>.
 
 =cut
 
+sub is_alive { !$_[0]->{closed} }
+
+=method is_alive
+
+    my $alive = $transport->is_alive;
+
+Returns true while the subprocess can still carry requests, and false once it
+has exited or L</close> has been called. Used by L<Net::Async::MCP/ping> for
+its transport-level liveness check.
+
+=cut
+
 sub _on_stdout_read {
   my ( $self, $buffref, $eof ) = @_;
   $self->{buffer} .= $$buffref;
