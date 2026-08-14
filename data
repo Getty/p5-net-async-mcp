@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-14T22:42:01Z
+created: 2026-08-14T20:42:43Z
+id: 5
+priority: critical
+started: 2026-08-14T22:26:45Z
+status: done
+tags:
+- http
+- protocol
+title: 'HTTP: SSE inkrementell lesen, Notifications zustellen'
+updated: 2026-08-14T22:42:01Z
+---
+
+send_request wartet auf die vollstaendige Response und parst dann decoded_content. Folge: notifications/progress und notifications/message waehrend eines langen tools/call werden verworfen - _handle_sse_response behaelt nur das Event, das wie die finale Response aussieht. Fix: Net::Async::HTTP streamend nutzen (on_header liefert einen Chunk-Callback), SSE-Events beim Eintreffen parsen, Notifications (kein id) an einen on_notification-Handler geben, die Response (mit id) loest das Future auf. Deckt NICHT subscriptions/listen ab, das ist #14.
