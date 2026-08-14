@@ -1,4 +1,10 @@
 {{$NEXT}}
+  - Added subscriptions_listen client method for the subscriptions/listen
+    request, completing the set of current-revision client methods
+    (list_tools/call_tool, list_prompts/get_prompt, list_resources/read_resource,
+    and subscriptions/listen). It carries the standard _meta on every request
+    and surfaces a server's METHOD_NOT_FOUND (e.g. when the server has no
+    notification transport) as a failed Future.
   - Fixed obsolete Rev-2025-11-25 initialize protocol. initialize now sends the
     current revision's server/discover request and carries protocol version,
     client capabilities, and client info in _meta on every request, restoring a

@@ -104,4 +104,16 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   is(scalar @$resources, 0, 'no resources');
 }
 
+# Test subscriptions_listen with an InProcess server that has no notification
+# transport attached: MCP::Server::_handle_listen only honours the request when
+# the server's transport supports notifications, otherwise it responds with
+# JSON-RPC error -32601 (METHOD_NOT_FOUND). We verify that subscriptions_listen
+# builds a _meta-carrying request (so it reaches the handler and fails with
+# "method not found" rather than a protocol error) and surfaces that failure.
+{
+  my $f = $mcp->subscriptions_listen({ toolsListChanged => 1 });
+  ok($f->failure, 'subscriptions_listen fails on a server without notification transport');
+  like($f->failure, qr/not found/i, 'failure is JSON-RPC METHOD_NOT_FOUND');
+}
+
 done_testing;

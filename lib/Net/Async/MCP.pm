@@ -352,6 +352,32 @@ hashref.
 
 =cut
 
+async sub subscriptions_listen {
+  my ( $self, $notifications ) = @_;
+  my $result = await $self->{transport}->send_request('subscriptions/listen',
+    $self->_with_meta({
+      notifications => $notifications // {},
+    }));
+  return $result;
+}
+
+=method subscriptions_listen
+
+    my $subscription = await $mcp->subscriptions_listen({ toolsListChanged => 1 });
+
+Opens a C<subscriptions/listen> subscription on the MCP server, requesting
+server-initiated notifications. C<$notifications> is a hashref mapping
+notification types to a truthy value (e.g. C<toolsListChanged>,
+C<promptsListChanged>, C<resourcesListChanged>). The request carries the
+standard C<_meta> like all client methods.
+
+Returns the server's C<subscriptions/listen> result. Whether a server supports
+this method (and its notifications) is transport-dependent; a server without
+notification support responds with JSON-RPC error -32601 (C<METHOD_NOT_FOUND>),
+which this method surfaces as a failed L<Future>.
+
+=cut
+
 async sub ping {
   my ( $self ) = @_;
   # The current MCP revision moved liveness to the transport level and has no
