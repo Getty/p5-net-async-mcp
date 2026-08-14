@@ -9,6 +9,9 @@
     and client-side _meta injection in Net::Async::MCP; transports remain dumb
   - server_info is now read from result._meta."io.modelcontextprotocol/serverInfo";
     server_capabilities from result.capabilities
+  - ping is now a transport-level liveness no-op (the current MCP revision has
+    no client-addressable JSON-RPC ping request); it returns success without
+    sending a request that would fail against MCP::Server >= 0.15
 
 0.003     2026-07-12 20:46:34Z
   - Fixed InProcess transport to pass a real MCP::Server::Context to

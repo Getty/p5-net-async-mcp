@@ -52,8 +52,12 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   is($mcp->server_info->{name}, 'TestServer', 'server_info accessor');
 }
 
-# NOTE: the current MCP revision has no JSON-RPC "ping" request (it lives at
-# the transport level), so it is not tested here.
+# ping is a transport-level liveness no-op in the current protocol (no
+# client-addressable JSON-RPC ping); it must succeed.
+{
+  my $ok = $mcp->ping->get;
+  ok($ok, 'ping (transport-level liveness) succeeds');
+}
 
 # Test list_tools
 {

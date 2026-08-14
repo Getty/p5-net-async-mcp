@@ -196,9 +196,9 @@ sub server_info { $_[0]->{server_info} }
 
     my $info = $mcp->server_info;
 
-Returns the server info hashref from the MCP initialize response. Contains at
-minimum C<name> and C<version> keys. Only available after L</initialize> has
-been called.
+Returns the server info hashref from the MCP C<server/discover> handshake
+response. Contains at minimum C<name> and C<version> keys. Only available after
+L</initialize> has been called.
 
 =cut
 
@@ -208,8 +208,8 @@ sub server_capabilities { $_[0]->{server_capabilities} }
 
     my $caps = $mcp->server_capabilities;
 
-Returns the server capabilities hashref from the MCP initialize response.
-Only available after L</initialize> has been called.
+Returns the server capabilities hashref from the MCP C<server/discover>
+handshake response. Only available after L</initialize> has been called.
 
 =cut
 
@@ -354,7 +354,12 @@ hashref.
 
 async sub ping {
   my ( $self ) = @_;
-  await $self->{transport}->send_request('ping', $self->_with_meta);
+  # The current MCP revision moved liveness to the transport level and has no
+  # client-addressable JSON-RPC "ping" request. Sending one would fail against
+  # MCP::Server >= 0.15 (InProcess errors with -32601); stdio only "succeeded"
+  # via an accidental legacy latch. Keep a transport-level liveness check that
+  # returns success while the transport is fully set up.
+  $self->_ensure_transport;
   return 1;
 }
 
@@ -362,8 +367,11 @@ async sub ping {
 
     await $mcp->ping;
 
-Sends a ping request to verify the server is alive and responsive. Returns
-C<1> on success, fails the returned L<Future> if the server does not respond.
+Performs a transport-level liveness check. The current MCP revision moved
+liveness to the transport layer and has no client-addressable JSON-RPC
+C<ping> request, so this is a no-op that returns C<1> once the transport is
+set up, rather than sending a C<ping> that would fail against
+L<MCP::Server> E<gt>= 0.15.
 
 =cut
 

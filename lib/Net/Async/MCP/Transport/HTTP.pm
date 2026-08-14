@@ -281,7 +281,7 @@ sub _handle_sse_response {
 
 =item * L<Net::Async::HTTP> - HTTP client used internally
 
-=item * L<https://modelcontextprotocol.io/specification/2025-11-25/basic/transports> - MCP Streamable HTTP transport specification
+=item * L<https://modelcontextprotocol.io/specification/2026-07-28/basic/transports> - MCP Streamable HTTP transport specification
 
 =back
 
