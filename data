@@ -1,0 +1,17 @@
+---
+class: standard
+completed: 2026-08-14T22:59:27Z
+created: 2026-08-14T22:43:04Z
+depends_on:
+- 5
+id: 17
+priority: high
+started: 2026-08-14T22:43:25Z
+status: done
+tags:
+- api
+title: on_notification vom Client zum Transport durchreichen
+updated: 2026-08-14T22:59:27Z
+---
+
+Der HTTP-Transport bietet seit #5 einen on_notification-Event-Handler an, aber Net::Async::MCP reicht nichts durch - ein Aufrufer, der den Client benutzt (also alle), kommt nicht dran. Muster: wie headers/timeout/stall_timeout in @HTTP_KEYS, plus configure-Durchreiche an einen bereits gebauten Transport.
