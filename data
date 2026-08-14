@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T22:37:48Z
+created: 2026-08-14T22:25:03Z
+id: 13
+priority: medium
+started: 2026-08-14T22:26:51Z
+status: done
+tags:
+- stdio
+title: Stdio-Transport wird nie freigegeben (Retention)
+updated: 2026-08-14T22:37:48Z
+---
+
+Vorbestehend, beim Cancellation-Ticket #8 gemessen: _add_to_loop legt on_read/on_finish-Closures an, die $self stark fangen und auf den Child-Streams des IO::Async::Process liegen, den der Transport selbst besitzt. Zyklus: transport -> Process -> Stream -> Closure -> transport. Eine Weak-Ref-Probe zeigt den Transport nach close + loop->remove + undef weiterhin am Leben. Fix: die drei Closures weaken, wie es #8 fuer on_cancel schon macht.
