@@ -37,6 +37,10 @@ implementation), the promise is resolved synchronously via C<wait()>. For
 fully non-blocking async tools, use L<Net::Async::MCP::Transport::Stdio>
 with a separate subprocess instead.
 
+Communication is strictly request/response: there is no stream the server
+could push notifications back over, so C<subscriptions/listen> is not usable
+with this transport. See L</send_request>.
+
 This transport is selected automatically by L<Net::Async::MCP> when
 constructed with a C<server> argument.
 
@@ -89,6 +93,20 @@ sub send_request {
     $response = $resolved;
   }
 
+  # A JSON-RPC response is plain data, so anything still blessed here is a
+  # return shape only a transport can serve. MCP::Server hands back an
+  # MCP::Server::Subscription for subscriptions/listen once the server has a
+  # notification capable transport of its own, expecting it to be turned into a
+  # notification stream. In process there is nothing to stream over, and that
+  # is our limitation to report, not a malformed response from the server.
+  if (blessed $response) {
+    return Future->fail(
+      "MCP server returned a " . ref($response) . " for '$method' instead of a "
+      . "JSON-RPC response: the in-process transport cannot carry "
+      . "server-initiated notifications, so subscriptions/listen is not usable "
+      . "here");
+  }
+
   return $self->_process_response($response);
 }
 
@@ -105,6 +123,15 @@ C<header_params> among them, and ignores all of them: they describe how a
 request is mirrored into HTTP headers, and this transport hands the request to
 the server as it stands. See
 L<Net::Async::MCP::Transport::HTTP/send_request>.
+
+C<subscriptions/listen> is the one method that cannot be served here. If the
+server object has a notification capable transport of its own, L<MCP::Server>
+answers that request with an L<MCP::Server::Subscription> object rather than a
+JSON-RPC response, leaving it to the transport to turn it into a notification
+stream; this transport has none, so the returned L<Future> fails saying that it
+cannot carry server-initiated notifications. A server without such a transport
+never gets that far and answers with JSON-RPC error -32601
+(C<METHOD_NOT_FOUND>), which is reported like any other server error.
 
 =cut
 

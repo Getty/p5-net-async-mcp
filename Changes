@@ -1,4 +1,33 @@
 {{$NEXT}}
+  - Added a headers option to the client and the HTTP transport, settable at
+    construction and through configure, so an Authorization header can be sent
+    at all: a server behind OAuth was previously unreachable, since the
+    transport built its header list entirely by itself. Caller headers go on
+    underneath the ones derived from the request body and a colliding one is
+    dropped rather than sent alongside, because HTTP::Headers keeps a field
+    given twice as two values of one header instead of letting the later win,
+    which a conforming server sees as a header diverging from the body and
+    rejects with -32020. Configuring them on a client that already joined a
+    loop reaches the live transport, so a bearer token can be rotated
+  - Added timeout and stall_timeout options for the HTTP transport, which ran
+    without either: a hung server hung the caller indefinitely. stall_timeout
+    defaults to 60 seconds and fires only when a request spends that long
+    without a byte moving, so it catches the hung connection without touching
+    a tools/call that legitimately runs for minutes. timeout, the limit on a
+    whole request, deliberately has no default for that same reason
+  - Fixed the InProcess transport reporting a correct server answer as
+    "Invalid response from MCP server". A server object with a notification
+    capable transport of its own answers subscriptions/listen with an
+    MCP::Server::Subscription object rather than a JSON-RPC response, which
+    this transport has nothing to stream over; it now says that instead of
+    blaming the response
+  - Added cancellation to the Stdio transport: cancelling the Future returned
+    by send_request drops the pending entry and writes a
+    notifications/cancelled naming that request, which is the stdio form of
+    cancellation (on HTTP it is closing the response stream). Nothing is
+    written for a request that is already answered or whose subprocess has
+    exited. The callback holds the transport weakly, since the pending table
+    holds the future and the future holds the callback
   - Fixed configure(protocol_version => undef) leaving the client without any
     protocol version: the fallback was guarded by a check against an already
     emptied hash and so never ran, after which every request carried a null

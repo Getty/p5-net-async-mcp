@@ -5,6 +5,7 @@ use Test2::V0;
 use IO::Async::Loop;
 use Net::Async::MCP;
 use MCP::Server;
+use MCP::Server::Transport::HTTP;
 use MCP::Constants qw(PROTOCOL_VERSION);
 
 # Create test MCP server with tools
@@ -127,6 +128,33 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   my $f = $mcp->subscriptions_listen({ toolsListChanged => 1 });
   ok($f->failure, 'subscriptions_listen fails on a server without notification transport');
   like($f->failure, qr/not found/i, 'failure is JSON-RPC METHOD_NOT_FOUND');
+}
+
+# The other half: a server that does have a notification capable transport of
+# its own. MCP::Server::_handle_listen then answers with an
+# MCP::Server::Subscription object instead of a JSON-RPC response, expecting the
+# transport to serve it as a notification stream. In process there is no stream,
+# so the transport has to name its own limitation rather than blame the server
+# for a malformed response - the message is what tells a caller whether to fix
+# their server or pick another transport.
+{
+  my $streaming = MCP::Server->new(name => 'StreamingServer');
+  $streaming->transport(
+    MCP::Server::Transport::HTTP->new(server => $streaming, streaming => 1));
+  ok($streaming->transport->notifications,
+    'the attached server transport supports notifications');
+
+  my $client = Net::Async::MCP->new(server => $streaming);
+  $loop->add($client);
+
+  my $f = $client->subscriptions_listen({ toolsListChanged => 1 });
+  ok($f->failure, 'subscriptions_listen fails on a notification capable server too');
+  like($f->failure, qr/cannot carry server-initiated notifications/,
+    'the failure names the in-process transport as the limitation');
+  like($f->failure, qr{subscriptions/listen is not usable},
+    'and says which method is out of reach here');
+  unlike($f->failure, qr/Invalid response/,
+    'and does not accuse the server of a malformed response');
 }
 
 # A server whose discover result carries no _meta at all. MCP::Server always

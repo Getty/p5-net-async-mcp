@@ -7,6 +7,7 @@ use parent 'IO::Async::Notifier';
 use Future;
 use JSON::MaybeXS;
 use Carp qw( croak );
+use Scalar::Util qw( weaken );
 
 =head1 SYNOPSIS
 
@@ -113,6 +114,21 @@ sub send_request {
 
   my $future = $self->loop->new_future;
   $self->{pending}{$id} = $future;
+
+  # The pending table holds the future and the future holds this callback, so
+  # the callback must not hold the transport: that closes a reference cycle no
+  # refcount ever breaks. Future drops its on_cancel list as soon as a future
+  # is marked ready, so a request answered by the server, or failed by
+  # _on_finish, never reaches this code.
+  weaken( my $weak_self = $self );
+  $future->on_cancel(sub {
+    my $self = $weak_self or return;
+    delete $self->{pending}{$id};
+    return if $self->{closed};
+    $self->send_notification('notifications/cancelled', { requestId => $id });
+    return;
+  });
+
   return $future;
 }
 
@@ -126,6 +142,20 @@ when the matching response is read from stdout, or fails with an error if the
 server returns a JSON-RPC error or the process exits.
 
 Fails immediately if the subprocess has already exited.
+
+Cancelling the returned L<Future> cancels the request: the pending entry is
+dropped, so a response that still arrives for it is discarded, and a
+C<notifications/cancelled> notification naming that request in C<requestId> is
+written to the subprocess stdin. No C<reason> is sent, since C<< ->cancel >>
+carries no argument to put there. Nothing is written if the future is already
+done or failed, or if the subprocess has exited: a cancellation never writes
+into a dead pipe.
+
+This is the stdio form of cancellation. On Streamable HTTP a request is
+cancelled by closing its response stream instead, so
+L<Net::Async::MCP::Transport::HTTP> sends no such notification. Note that an
+MCP server is free to ignore the notification and finish the request anyway;
+cancelling only guarantees that this client stops caring about the answer.
 
 Accepts the same optional trailing name/value options as the other transports,
 C<header_params> among them, and ignores all of them: they describe how a

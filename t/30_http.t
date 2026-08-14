@@ -14,7 +14,7 @@ use Net::Async::MCP::Transport::HTTP;
 # is a recommendation and not a requirement: without it there is no usable HTTP
 # transport, so there is nothing here to test either.
 skip_all 'HTTP::Message is required for the HTTP transport tests'
-  unless eval { require HTTP::Response; 1 };
+  unless eval { require HTTP::Response; require HTTP::Request; 1 };
 
 # The suite has no MCP server to talk to over HTTP, so these tests drive the
 # response handling directly: turning an HTTP response into a Future is where
@@ -171,6 +171,73 @@ sub decoded_name {
 
   ok(!exists headers('tools/call', { name => 'deploy' })->{'Mcp-Param-Region'},
     'no Mcp-Param header without the client asking for one');
+}
+
+# A caller's own headers are the only way an Authorization reaches the server:
+# no part of the protocol describes one, so without them a remote MCP server
+# behind OAuth cannot be talked to at all.
+{
+  my $auth = Net::Async::MCP::Transport::HTTP->new(
+    url     => 'http://mcp.invalid/mcp',
+    headers => {
+      Authorization => 'Bearer t0ken',
+      'X-Trace-Id'  => 'abc123',
+    },
+  );
+
+  my $h = { $auth->_standard_headers('tools/list', {
+    _meta => { 'io.modelcontextprotocol/protocolVersion' => '2026-07-28' },
+  }) };
+
+  is($h->{'Authorization'}, 'Bearer t0ken', 'a configured Authorization is sent');
+  is($h->{'X-Trace-Id'}, 'abc123', 'as is any other header the caller configured');
+  is($h->{'Mcp-Method'}, 'tools/list',
+    'next to, not instead of, the headers derived from the body');
+}
+
+# The derived headers are the ones the server compares against the body, and it
+# answers -32020 for any that diverges, so a caller must not be able to reach
+# them. Ordering the caller's first is not enough on its own: HTTP::Headers
+# keeps a field given twice as two values of one header rather than letting the
+# later win, so a colliding header would still travel to the server.
+{
+  my $hostile = Net::Async::MCP::Transport::HTTP->new(
+    url     => 'http://mcp.invalid/mcp',
+    headers => {
+      'Mcp-Method'           => 'tools/list',
+      'mcp-protocol-version' => '1999-01-01',
+      'Mcp-Name'             => 'other_tool',
+      'Mcp-Param-Region'     => 'us-east1',
+      'Authorization'        => 'Bearer t0ken',
+    },
+  );
+
+  my @headers = $hostile->_standard_headers('tools/call',
+    {
+      name  => 'deploy',
+      _meta => { 'io.modelcontextprotocol/protocolVersion' => '2026-07-28' },
+    },
+    header_params => [ { name => 'Region', value => 'europe-west1' } ]);
+
+  # What the server gets to see, rather than the list this client passes around
+  my $req = HTTP::Request->new(POST => 'http://mcp.invalid/mcp', [@headers], '');
+
+  is($req->header('Mcp-Method'), 'tools/call',
+    'the method header stays the method being called');
+  is($req->header('MCP-Protocol-Version'), '2026-07-28',
+    'the protocol version stays the one in the body _meta');
+  is($req->header('Mcp-Name'), 'deploy', 'the name stays the one in the body');
+  is($req->header('Mcp-Param-Region'), 'europe-west1',
+    'an annotated argument keeps the value the client resolved for it');
+  is($req->header('Authorization'), 'Bearer t0ken',
+    'while a header the protocol derives nothing for is passed through untouched');
+
+  my %count;
+  for (my $i = 0; $i < @headers; $i += 2) { $count{ lc $headers[$i] }++ }
+  is($count{'mcp-method'}, 1,
+    'a colliding caller header is dropped, not sent as a second value');
+  is($count{'mcp-protocol-version'}, 1, 'and its case does not get it past the filter');
+  is($count{'mcp-param-region'}, 1, 'nor does an annotated argument name');
 }
 
 ok($transport->mirrors_header_params,
@@ -466,5 +533,90 @@ sub sent_methods {
   like($f->failure, qr/^MCP HTTP error: 500/,
     'a non-2xx without a usable body fails with the HTTP status line');
 }
+
+# Net::Async::HTTP applies no timeout unless it is given one, so a server that
+# accepts a POST and then goes quiet holds the caller forever. Only the stall
+# timeout has a default: it fires when nothing at all arrives any more, where a
+# wall-clock timeout would also cut off a tools/call that is legitimately slow.
+# These tests need a loop, since the transport builds its client when it joins
+# one, but no server: nothing is sent.
+subtest 'timeouts reach the HTTP client' => sub {
+  skip_all 'Net::Async::HTTP is required for the timeout tests'
+    unless eval { require Net::Async::HTTP; 1 };
+
+  require IO::Async::Loop;
+  my $loop = IO::Async::Loop->new;
+
+  # Net::Async::HTTP exposes neither value, and what has to be right is what
+  # the object it makes its requests with was configured with.
+  my $default = Net::Async::MCP::Transport::HTTP->new(url => 'http://mcp.invalid/mcp');
+  $loop->add($default);
+  is($default->{http}{stall_timeout}, 60, 'a 60 second stall timeout is the default');
+  is($default->{http}{timeout}, undef,
+    'and no wall-clock timeout, which would break a legitimately slow tool call');
+
+  my $configured = Net::Async::MCP::Transport::HTTP->new(
+    url           => 'http://mcp.invalid/mcp',
+    timeout       => 30,
+    stall_timeout => 5,
+  );
+  $loop->add($configured);
+  is($configured->{http}{timeout}, 30, 'a configured timeout is passed on');
+  is($configured->{http}{stall_timeout}, 5,
+    'and a configured stall timeout replaces the default');
+
+  # Net::Async::HTTP::Connection builds a stall timer only for a true value, so
+  # 0 is how the stall timeout is switched off - unlike timeout, where 0 is a
+  # limit of zero seconds that would fail every request.
+  my $off = Net::Async::MCP::Transport::HTTP->new(
+    url           => 'http://mcp.invalid/mcp',
+    stall_timeout => 0,
+  );
+  $loop->add($off);
+  ok(!$off->{http}{stall_timeout}, 'a stall timeout of 0 switches it off');
+
+  $configured->configure(stall_timeout => 90);
+  is($configured->{http}{stall_timeout}, 90,
+    'configuring one after the client exists reaches it');
+
+  $loop->remove($_) for $default, $configured, $off;
+};
+
+# The transport is built by the client, so anything a caller cannot hand to the
+# client cannot reach it at all - which is what kept an Authorization out.
+subtest 'the client passes the HTTP options through' => sub {
+  skip_all 'Net::Async::HTTP is required for the pass-through tests'
+    unless eval { require Net::Async::HTTP; 1 };
+
+  require IO::Async::Loop;
+  my $loop = IO::Async::Loop->new;
+
+  my $mcp = Net::Async::MCP->new(
+    url     => 'http://mcp.invalid/mcp',
+    headers => { Authorization => 'Bearer t0ken' },
+    timeout => 30,
+  );
+  $loop->add($mcp);
+
+  is($mcp->headers, { Authorization => 'Bearer t0ken' }, 'the client reports its headers');
+  is($mcp->timeout, 30, 'and its timeout');
+  is($mcp->stall_timeout, undef, 'and reports nothing where nothing was configured');
+
+  my $t = $mcp->{transport};
+  is($t->{headers}, { Authorization => 'Bearer t0ken' }, 'the transport was given the headers');
+  is($t->{http}{timeout}, 30, 'and the timeout reached Net::Async::HTTP');
+  is($t->{http}{stall_timeout}, 60,
+    'while an unset stall timeout leaves the transport default standing rather than off');
+
+  # A bearer token is rotated while the client is up, long after the transport
+  # was built, so a configure that only reached the client would be lost.
+  $mcp->configure(headers => { Authorization => 'Bearer fresh' });
+  is($t->{headers}, { Authorization => 'Bearer fresh' },
+    'a later configure reaches the transport that already exists');
+  is({ $t->_standard_headers('tools/list', {}) }->{'Authorization'}, 'Bearer fresh',
+    'so the next request carries the new token');
+
+  $loop->remove($mcp);
+};
 
 done_testing;

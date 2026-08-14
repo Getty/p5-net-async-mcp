@@ -44,7 +44,8 @@ our $VERSION = '0.004';
 
     # HTTP transport (remote MCP server)
     my $mcp_http = Net::Async::MCP->new(
-        url => 'https://example.com/mcp',
+        url     => 'https://example.com/mcp',
+        headers => { Authorization => "Bearer $token" },
     );
     $loop->add($mcp_http);
 
@@ -94,9 +95,15 @@ carrying the client's protocol version, capabilities, and info in C<_meta>.
 my $DEFAULT_PROTOCOL_VERSION
   = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
 
+# The keys handed to the HTTP transport as they are. Kept apart from the rest
+# because they are passed on only when the caller actually gave them: the
+# transport's own default for stall_timeout has to survive a client that was
+# never asked about it.
+my @HTTP_KEYS = qw( headers timeout stall_timeout );
+
 sub _init {
   my ( $self, $params ) = @_;
-  for my $key (qw( server command url protocol_version )) {
+  for my $key (qw( server command url protocol_version ), @HTTP_KEYS) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
   $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
@@ -105,10 +112,20 @@ sub _init {
 
 sub configure {
   my ( $self, %params ) = @_;
-  for my $key (qw( server command url protocol_version )) {
+  my @http = grep { exists $params{$_} } @HTTP_KEYS;
+  for my $key (qw( server command url protocol_version ), @HTTP_KEYS) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
   $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
+
+  # A transport that already exists takes the change too: the transport is
+  # built when this client joins a loop, and a bearer token that has to be
+  # rotated arrives long after that.
+  $self->{transport}->configure(map { $_ => $self->{$_} } @http)
+    if @http
+    && $self->{transport}
+    && $self->{transport}->isa('Net::Async::MCP::Transport::HTTP');
+
   $self->SUPER::configure(%params);
 }
 
@@ -144,6 +161,10 @@ sub _ensure_transport {
     require Net::Async::MCP::Transport::HTTP;
     my $transport = Net::Async::MCP::Transport::HTTP->new(
       url => $self->{url},
+      # Only the keys the caller actually gave: handing over a stall_timeout of
+      # undef for one that was never set would switch off the transport's
+      # default instead of leaving it alone.
+      map { $_ => $self->{$_} } grep { exists $self->{$_} } @HTTP_KEYS,
     );
     $self->{transport} = $transport;
     $self->add_child($transport);
@@ -163,6 +184,55 @@ Returns (or via C<configure>/constructor argument C<protocol_version> sets) the
 MCP protocol revision this client speaks on the wire, such as C<'2026-07-28'>.
 Defaults to the L<MCP::Constants> C<PROTOCOL_VERSION> of the installed
 L<MCP::Server>. Sent on every request inside C<_meta>.
+
+=cut
+
+sub headers { $_[0]->{headers} }
+
+=method headers
+
+    my $headers = $mcp->headers;
+    $mcp->configure(headers => { Authorization => "Bearer $token" });
+
+Returns (or via C<configure>/constructor argument C<headers> sets) a HashRef of
+extra headers sent with every HTTP request, which is how a server behind OAuth
+is reached: nothing else in this client sets an C<Authorization>. Configuring
+them after the client has joined a loop works too, so a token can be rotated on
+a live client.
+
+They cannot take over a header the MCP binding derives from the request body -
+see L<Net::Async::MCP::Transport::HTTP/new> for why that is a rejection rather
+than an override. Only the HTTP transport sends headers at all; the InProcess
+and Stdio transports ignore this.
+
+=cut
+
+sub timeout { $_[0]->{timeout} }
+
+=method timeout
+
+    my $timeout = $mcp->timeout;
+
+Returns (or via C<configure>/constructor argument C<timeout> sets) the
+wall-clock limit in seconds on a single HTTP request. Unset by default, because
+an MCP C<tools/call> may legitimately run for minutes and a default would break
+such a setup; L</stall_timeout> is the one that guards against a hung server.
+Note that C<0> is a limit of zero seconds rather than "no limit". HTTP
+transport only.
+
+=cut
+
+sub stall_timeout { $_[0]->{stall_timeout} }
+
+=method stall_timeout
+
+    my $stall_timeout = $mcp->stall_timeout;
+
+Returns (or via C<configure>/constructor argument C<stall_timeout> sets) how
+many seconds an HTTP request may go without a single byte moving before it is
+given up on. Set it to C<0> to switch it off. Undef here means it was never
+configured and L<Net::Async::MCP::Transport::HTTP>'s default of 60 seconds
+applies. HTTP transport only.
 
 =cut
 

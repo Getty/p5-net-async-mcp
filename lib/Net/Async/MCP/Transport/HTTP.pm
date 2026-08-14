@@ -68,10 +68,19 @@ my %NAME_PARAM = (
   'tools/call'     => 'name',
 );
 
+my $DEFAULT_STALL_TIMEOUT = 60;
+
 sub _init {
   my ( $self, $params ) = @_;
   $self->{url} = delete $params->{url}
     or croak "url is required";
+  # exists, not defined: an explicit undef is a caller switching a timeout off,
+  # and has to survive the default applied below.
+  for my $key (qw( headers timeout stall_timeout )) {
+    $self->{$key} = delete $params->{$key} if exists $params->{$key};
+  }
+  $self->{stall_timeout} = $DEFAULT_STALL_TIMEOUT
+    unless exists $self->{stall_timeout};
   $self->{next_id} = 0;
   $self->{json}    = JSON::MaybeXS->new(utf8 => 1, convert_blessed => 1);
   $self->SUPER::_init($params);
@@ -81,6 +90,14 @@ sub configure {
   my ( $self, %params ) = @_;
   if (exists $params{url}) {
     $self->{url} = delete $params{url};
+  }
+  $self->{headers} = delete $params{headers} if exists $params{headers};
+  for my $key (qw( timeout stall_timeout )) {
+    next unless exists $params{$key};
+    $self->{$key} = delete $params{$key};
+    # Only once this transport has joined a loop is there an HTTP client to
+    # reconfigure; before that _add_to_loop picks the values up itself.
+    $self->{http}->configure($key => $self->{$key}) if $self->{http};
   }
   $self->SUPER::configure(%params);
 }
@@ -93,10 +110,51 @@ sub _add_to_loop {
 
   my $http = Net::Async::HTTP->new(
     max_connections_per_host => 0,
+    timeout                  => $self->{timeout},
+    stall_timeout            => $self->{stall_timeout},
   );
   $self->{http} = $http;
   $self->add_child($http);
 }
+
+=method new
+
+    my $transport = Net::Async::MCP::Transport::HTTP->new(
+        url     => 'https://example.com/mcp',
+        headers => { Authorization => "Bearer $token" },
+    );
+
+Constructs a new HTTP transport. C<url> is required and names the MCP endpoint
+every request is POSTed to. Usually not called directly: L<Net::Async::MCP>
+builds this transport itself and passes the same arguments through, so a caller
+configures them there.
+
+C<headers> is a HashRef of headers added to every POST - the place for
+everything the protocol does not describe, an C<Authorization: Bearer ...> for
+a server behind OAuth above all. They go on the request underneath the headers
+this transport derives from the body, so a caller can add its own but cannot
+replace C<MCP-Protocol-Version>, C<Mcp-Method>, C<Mcp-Name> or an
+C<Mcp-Param-{Name}>: a header that disagrees with the body is exactly what a
+conforming server answers with C<-32020>. A colliding header is dropped rather
+than sent alongside the derived one, which would be the same divergence in
+another shape.
+
+C<timeout> and C<stall_timeout> are handed to the underlying
+L<Net::Async::HTTP>, in seconds. C<stall_timeout> defaults to 60 and is the
+only one with a default: it fires when a request spends that long without a
+single byte moving in either direction, which is the hung connection a client
+cannot otherwise notice, and it does not touch a request that is still making
+progress. C<timeout>, the wall-clock limit on a whole request, deliberately has
+no default - an MCP C<tools/call> may legitimately run for minutes, so a
+default here would break working setups rather than protect them, and only a
+caller that knows its own upper bound can pick one.
+
+Pass C<stall_timeout> as C<0> (or C<undef>) to switch the stall timeout off.
+C<timeout> is off unless set, and has to stay C<undef> to stay off: a
+C<timeout> of C<0> is a real limit of zero seconds that fails every request
+immediately.
+
+=cut
 
 sub send_request {
   my ( $self, $method, $params, %options ) = @_;
@@ -280,7 +338,30 @@ sub _standard_headers {
       "Mcp-Param-$param->{name}" => $self->_encode_header($param->{value} // '');
   }
 
-  return @headers;
+  # The caller's own headers go first and the derived ones after, so an
+  # Authorization can be added while an Mcp-Method cannot be taken over.
+  return ( $self->_caller_headers(@headers), @headers );
+}
+
+# The headers configured on this transport, minus every field the request
+# derives from its body. Dropping them is not the same as ordering them:
+# HTTP::Headers keeps a field given twice in one list as two values of one
+# header rather than letting the later win, so a colliding caller header would
+# travel alongside the derived one and diverge from the body just as visibly.
+sub _caller_headers {
+  my ( $self, @derived ) = @_;
+
+  my $headers = $self->{headers};
+  return () unless ref $headers eq 'HASH';
+
+  my %derived;
+  for (my $i = 0; $i < @derived; $i += 2) {
+    $derived{ lc $derived[$i] } = 1;
+  }
+
+  return map  { $_ => $headers->{$_} }
+         grep { !$derived{ lc $_ } }
+         sort keys %$headers;
 }
 
 # A header value that is not printable ASCII travels base64 encoded in a
