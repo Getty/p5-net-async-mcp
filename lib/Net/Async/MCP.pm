@@ -7,6 +7,7 @@ use parent 'IO::Async::Notifier';
 
 use Future::AsyncAwait;
 use Carp qw( croak );
+use Scalar::Util qw( looks_like_number );
 
 our $VERSION = '0.004';
 
@@ -255,7 +256,16 @@ async sub list_tools {
   my ( $self ) = @_;
   my $result = await $self->{transport}->send_request('tools/list',
     $self->_with_meta);
-  return $result->{tools} // [];
+  my $tools = $result->{tools} // [];
+
+  # A fresh listing is the whole truth about the server's tools, so it replaces
+  # the cache rather than adding to it.
+  $self->{tool_header_params} = {
+    map { $_->{name} => _header_params($_->{inputSchema}) }
+    grep { ref $_ eq 'HASH' && defined $_->{name} } @$tools
+  };
+
+  return $tools;
 }
 
 =method list_tools
@@ -265,15 +275,134 @@ async sub list_tools {
 Returns an ArrayRef of tool definition hashrefs from the MCP server. Each
 hashref contains C<name>, C<description>, and C<inputSchema> keys.
 
+Also caches, per tool, which of its arguments are annotated with
+C<x-mcp-header> in the input schema, which L</call_tool> needs to build the
+C<Mcp-Param-{Name}> headers of the HTTP binding.
+
+Pagination is not implemented: a C<nextCursor> in the result is ignored, so a
+server that pages its tool list is only seen with its first page, both in the
+returned list and in that cache.
+
 =cut
+
+# Private: the arguments a server expects mirrored into Mcp-Param-{Name}
+# headers - every property annotated with x-mcp-header, reachable from the
+# schema root through a chain of "properties" keys and nothing else. Same walk
+# as MCP::Tool::_header_params, whose result the server checks the headers
+# against, down to sorting by key so both sides agree on order.
+sub _header_params {
+  my ( $schema, $path ) = @_;
+  $path //= [];
+
+  return [] unless ref $schema eq 'HASH' && ref $schema->{properties} eq 'HASH';
+
+  my $properties = $schema->{properties};
+  my @params;
+  for my $key (sort keys %$properties) {
+    my $property = $properties->{$key};
+    next unless ref $property eq 'HASH';
+
+    my @next = ( @$path, $key );
+    push @params, {
+      name => $property->{'x-mcp-header'},
+      path => \@next,
+      type => $property->{type} // '',
+    } if defined $property->{'x-mcp-header'};
+    push @params, @{ _header_params($property, \@next) };
+  }
+
+  return \@params;
+}
+
+# Private: the argument a header parameter points at, or undef if the caller
+# passed none. Same walk as MCP::Server::Transport::HTTP::_arg_value, which is
+# what the server compares the header against.
+sub _arg_value {
+  my ( $arguments, $path ) = @_;
+
+  my $value = $arguments;
+  for my $key (@$path) {
+    return undef unless ref $value eq 'HASH';
+    $value = $value->{$key};
+  }
+  return $value;
+}
+
+# Private: an argument value in the form the server's _match_value compares it
+# in. Getting this wrong is not a degradation but a rejection: the server
+# answers -32020 (HEADER_MISMATCH) for a header that disagrees with the body.
+sub _header_value {
+  my ( $type, $value ) = @_;
+
+  if ($type eq 'boolean') {
+    # A JSON false reaches us either as \0, which JSON::MaybeXS encodes as
+    # false, or as a JSON::PP::Boolean. The latter knows it is false, but \0 is
+    # a reference and so a *true* Perl value: asking it directly would put
+    # "true" in the header while the body says false. Unwrap plain scalar
+    # references first, and let an object's own boolean overload speak.
+    $value = $$value while ref $value eq 'SCALAR' || ref $value eq 'REF';
+    return $value ? 'true' : 'false';
+  }
+
+  # Compared numerically by the server, so the number decides, not its
+  # spelling. Anything that is not a number at all is passed through as text
+  # for the server to reject.
+  return 0 + $value if $type eq 'integer' && !ref $value && looks_like_number($value);
+
+  return "$value";
+}
+
+# Private: the Mcp-Param-{Name} bindings for a tools/call, as a list of
+# name/value pairs with each value already formatted the way the server
+# compares it.
+async sub _tool_header_params {
+  my ( $self, $name, $arguments ) = @_;
+
+  my $transport = $self->{transport};
+  return () unless $transport->can('mirrors_header_params')
+    && $transport->mirrors_header_params;
+
+  unless (exists $self->{tool_header_params}{$name}) {
+    # Calling a tool whose schema this client has never seen is not safe over a
+    # binding that mirrors arguments into headers: an annotated argument
+    # without its header is rejected outright, so the schema has to be fetched
+    # before the call goes out. A failure is deliberately swallowed - the tool
+    # may well have no annotated argument at all, and must not become
+    # uncallable because an unrelated tools/list failed. The request then goes
+    # out bare and the server decides.
+    await $self->list_tools->else(sub { Future->done });
+  }
+
+  my @params;
+  for my $param (@{ $self->{tool_header_params}{$name} // [] }) {
+    my $value = _arg_value($arguments, $param->{path});
+
+    # A header the server does not expect is rejected exactly like a missing
+    # one, so an argument the caller left out gets no header.
+    next unless defined $value;
+
+    push @params, {
+      name  => $param->{name},
+      value => _header_value($param->{type}, $value),
+    };
+  }
+
+  return @params;
+}
 
 async sub call_tool {
   my ( $self, $name, $arguments ) = @_;
+  $arguments //= {};
+
+  my @header_params = await $self->_tool_header_params($name, $arguments);
+
   my $result = await $self->{transport}->send_request('tools/call',
     $self->_with_meta({
       name      => $name,
-      arguments => $arguments // {},
-    }));
+      arguments => $arguments,
+    }),
+    @header_params ? ( header_params => \@header_params ) : (),
+  );
   return $result;
 }
 
@@ -284,6 +413,19 @@ async sub call_tool {
 Calls a named tool on the MCP server with the given arguments hashref.
 Returns a hashref with C<content> (ArrayRef of content blocks) and C<isError>
 (boolean).
+
+A tool may annotate arguments in its input schema with C<x-mcp-header>, which
+over the HTTP binding have to be mirrored into C<Mcp-Param-{Name}> headers; a
+conforming server rejects a C<tools/call> that passes such an argument without
+its header, and equally one that carries a header for an argument it did not
+pass. This method resolves them from the tool's input schema, which means it
+needs the schema: on a transport that mirrors headers it fetches L</list_tools>
+once for a tool it has not seen, and keeps using the cached schemas afterwards.
+If that fetch fails the call is still sent, without headers, leaving the
+decision to the server.
+
+Transports that do not mirror headers - InProcess and Stdio - resolve nothing
+and never fetch a tool list on their own.
 
 =cut
 

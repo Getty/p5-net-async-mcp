@@ -4,7 +4,10 @@ use Test2::V0;
 
 use MIME::Base64 qw( decode_base64 );
 use Encode qw( decode );
+use Future;
+use JSON::MaybeXS;
 
+use Net::Async::MCP;
 use Net::Async::MCP::Transport::HTTP;
 
 # HTTP::Message reaches this distribution only through Net::Async::HTTP, which
@@ -40,8 +43,8 @@ sub response {
 # single request.
 
 sub headers {
-  my ( $method, $params ) = @_;
-  return { $transport->_standard_headers($method, $params) };
+  my ( $method, $params, @options ) = @_;
+  return { $transport->_standard_headers($method, $params, @options) };
 }
 
 # The header value the server compares is what comes back out of the sentinel
@@ -147,6 +150,185 @@ sub decoded_name {
   is($no_meta->{'Mcp-Method'}, 'tools/list', 'while Mcp-Method is there either way');
 }
 
+# Tool arguments annotated with x-mcp-header travel as Mcp-Param-{Name}. The
+# client resolves which ones and what they say; this transport only puts them
+# on the wire, through the same sentinel encoding as Mcp-Name, since
+# MCP::Server::Transport::HTTP::_check_params decodes both the same way.
+{
+  my $h = headers('tools/call',
+    { name => 'deploy', arguments => { region => 'europe-west1' } },
+    header_params => [ { name => 'Region', value => 'europe-west1' } ]);
+  is($h->{'Mcp-Param-Region'}, 'europe-west1',
+    'an annotated argument becomes Mcp-Param-{Name}');
+
+  my $encoded = headers('tools/call',
+    { name => 'deploy', arguments => { region => "Gr\x{00fc}n" } },
+    header_params => [ { name => 'Region', value => "Gr\x{00fc}n" } ]);
+  is($encoded->{'Mcp-Param-Region'}, '=?base64?R3LDvG4=?=',
+    'a param value outside printable ASCII is base64 encoded like a tool name');
+  is(decoded_name($encoded->{'Mcp-Param-Region'}), "Gr\x{00fc}n",
+    'and the server decodes it back to the value in the body');
+
+  ok(!exists headers('tools/call', { name => 'deploy' })->{'Mcp-Param-Region'},
+    'no Mcp-Param header without the client asking for one');
+}
+
+ok($transport->mirrors_header_params,
+  'the HTTP transport is the one that mirrors header params');
+
+# From here the whole path is under test, from the arguments a caller passes to
+# the headers that would go on the wire: a wrong or missing Mcp-Param header is
+# not a cosmetic defect, the server answers -32020 and the call never runs.
+{
+  package Test::CapturingHTTP;
+
+  sub new {
+    my ( $class, %args ) = @_;
+    return bless { requests => [], responder => $args{responder} }, $class;
+  }
+
+  sub do_request {
+    my ( $self, %args ) = @_;
+    push @{ $self->{requests} }, $args{request};
+    return Future->done($self->{responder}->($args{request}));
+  }
+
+  sub requests { @{ $_[0]{requests} } }
+}
+
+my $json = JSON::MaybeXS->new(utf8 => 1, canonical => 1, convert_blessed => 1);
+
+# One tool with an argument per shape the server compares differently, plus one
+# argument that is not annotated at all and must stay out of the headers
+my $TOOL = {
+  name        => 'deploy',
+  description => 'Deploy a service',
+  inputSchema => {
+    type       => 'object',
+    properties => {
+      service  => { type => 'string' },
+      region   => { type => 'string',  'x-mcp-header' => 'Region' },
+      dry_run  => { type => 'boolean', 'x-mcp-header' => 'Dry-Run' },
+      replicas => { type => 'integer', 'x-mcp-header' => 'Replicas' },
+      options  => {
+        type       => 'object',
+        properties => {
+          label => { type => 'string', 'x-mcp-header' => 'Label' },
+        },
+      },
+    },
+  },
+};
+
+# A client whose transport answers out of this file instead of the network. The
+# transport builds its Net::Async::HTTP when it joins a loop, so handing it one
+# up front keeps the test off both.
+sub client {
+  my ( $responder ) = @_;
+
+  my $http = Test::CapturingHTTP->new(responder => $responder);
+  my $t = Net::Async::MCP::Transport::HTTP->new(url => 'http://mcp.invalid/mcp');
+  $t->{http} = $http;
+
+  my $mcp = Net::Async::MCP->new(url => 'http://mcp.invalid/mcp');
+  $mcp->{transport} = $t;
+
+  return ( $mcp, $http );
+}
+
+sub serve_tool {
+  my ( $request ) = @_;
+  my $data = $json->decode($request->content);
+
+  my $result = $data->{method} eq 'tools/list'
+    ? { tools => [$TOOL] }
+    : { content => [ { type => 'text', text => 'deployed' } ], isError => JSON::MaybeXS::false };
+
+  return response(200, 'application/json',
+    $json->encode({ jsonrpc => '2.0', id => $data->{id}, result => $result }));
+}
+
+sub sent_methods {
+  my ( $http ) = @_;
+  return [ map { $json->decode($_->content)->{method} } $http->requests ];
+}
+
+{
+  my ( $mcp, $http ) = client(\&serve_tool);
+
+  # \0 is what a caller writes for a JSON false, and it is a *reference*, so
+  # anything that asks it for its truth directly gets "true" - a header saying
+  # true while the body says false, which the server answers with -32020.
+  my $f = $mcp->call_tool('deploy', {
+    service  => 'api',
+    region   => 'europe-west1',
+    dry_run  => \0,
+    replicas => 3,
+    options  => { label => "Gr\x{00fc}n" },
+  });
+  ok($f->is_done, 'the call goes through') or diag $f->failure;
+
+  is(sent_methods($http), ['tools/list', 'tools/call'],
+    'a tool with no known schema is looked up once before it is called');
+
+  my ( $call ) = ($http->requests)[1];
+  is($call->header('Mcp-Param-Region'), 'europe-west1',
+    'a string argument is mirrored as it stands');
+  is($call->header('Mcp-Param-Dry-Run'), 'false',
+    'a \0 boolean is mirrored as false, not as the true reference it is');
+  is($call->header('Mcp-Param-Replicas'), '3', 'an integer is mirrored as its number');
+  is(decoded_name($call->header('Mcp-Param-Label')), "Gr\x{00fc}n",
+    'a nested argument is found through its properties path');
+  is($call->header('Mcp-Param-Service'), undef,
+    'an argument without x-mcp-header gets no header');
+}
+
+# The other two spellings of a boolean, and an argument the caller did not pass
+{
+  my ( $mcp, $http ) = client(\&serve_tool);
+  $mcp->call_tool('deploy', { dry_run => \1 })->get;
+  my ( $call ) = ($http->requests)[1];
+  is($call->header('Mcp-Param-Dry-Run'), 'true', 'a \1 boolean is mirrored as true');
+  is($call->header('Mcp-Param-Region'), undef,
+    'an argument the call did not pass gets no header, which the server would reject');
+}
+
+{
+  my ( $mcp, $http ) = client(\&serve_tool);
+  $mcp->call_tool('deploy', { dry_run => JSON::MaybeXS::false })->get;
+  my ( $call ) = ($http->requests)[1];
+  is($call->header('Mcp-Param-Dry-Run'), 'false',
+    'a JSON::PP::Boolean false is mirrored as false too');
+}
+
+# The schemas are cached, so a second call to the same tool asks for nothing
+{
+  my ( $mcp, $http ) = client(\&serve_tool);
+  $mcp->call_tool('deploy', { region => 'eu' })->get;
+  $mcp->call_tool('deploy', { region => 'us' })->get;
+  is(sent_methods($http), ['tools/list', 'tools/call', 'tools/call'],
+    'the tool list is fetched once, not per call');
+}
+
+# A tools/list that fails must not take the call with it: most tools have no
+# annotated argument at all and would become uncallable over an unrelated
+# error. The call goes out bare and the server decides.
+{
+  my ( $mcp, $http ) = client(sub {
+    my ( $request ) = @_;
+    my $data = $json->decode($request->content);
+    return HTTP::Response->new(500, 'Internal Server Error', [], '')
+      if $data->{method} eq 'tools/list';
+    return serve_tool($request);
+  });
+
+  my $f = $mcp->call_tool('deploy', { region => 'europe-west1' });
+  ok($f->is_done, 'the call survives a failed tool list') or diag $f->failure;
+  is(sent_methods($http), ['tools/list', 'tools/call'], 'and is still sent');
+  is(($http->requests)[1]->header('Mcp-Param-Region'), undef,
+    'without headers it could not resolve');
+}
+
 # MCP::Server renders a rejected _meta as -32602 with HTTP 400. Reporting the
 # status line instead would throw away the only useful part of the answer.
 {
@@ -220,6 +402,69 @@ sub decoded_name {
   my $f = $transport->_handle_response(response(200, 'application/json',
     '{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool"}}'));
   is($f->failure, 'MCP error -32602: Unknown tool', 'JSON-RPC error in a 200 response');
+}
+
+# An "error" that is not a JSON-RPC error object must not be read as one. This
+# is not a hypothetical shape: MCP::Server::Transport::HTTP renders its own
+# refusals as {error => 'Method not allowed'} and {error => 'Invalid JSON'},
+# and a gateway in between may put its own body in front of a 200. Reaching
+# into a string as if it were a hash throws, which no caller of a Future-
+# returning method expects, so the test has to survive the die to report on it.
+{
+  my $f;
+  ok(lives {
+    $f = $transport->_handle_response(response(200, 'application/json',
+      '{"error":"Method not allowed"}'));
+  }, 'a 200 whose error is a string does not die') or note $@;
+
+  ok($f && $f->is_failed, 'it fails the Future instead');
+  like($f->failure, qr/Method not allowed/,
+    'and the failure quotes what the body actually said');
+}
+
+{
+  my $body = "event: message\n"
+    . qq(data: {"jsonrpc":"2.0","id":1,"error":"Method not allowed"}\n\n);
+  my $f;
+  ok(lives { $f = $transport->_handle_response(response(200, 'text/event-stream', $body)) },
+    'the same body in an SSE event does not die either') or note $@;
+
+  ok($f && $f->is_failed, 'it fails the Future instead');
+  like($f->failure, qr/Method not allowed/,
+    'and the failure quotes what the event actually said');
+}
+
+# A JSON-RPC error object without a message is still a JSON-RPC error: the code
+# is the part the caller acts on, and interpolating an undef message would warn
+{
+  my $f = $transport->_handle_response(response(200, 'application/json',
+    '{"jsonrpc":"2.0","id":1,"error":{"code":-32603}}'));
+  is($f->failure, 'MCP error -32603: (no message)',
+    'a message-less JSON-RPC error reports its code without warning');
+}
+
+# A notification has no answer this client reads, so the status is all there is
+# to judge. Treating every completed POST as a success hid a rejection: the
+# client reported the notification as sent while the server had refused it.
+{
+  my $f = $transport->_handle_notification_response(
+    HTTP::Response->new(202, 'Accepted', [], ''));
+  ok($f->is_done, '202 Accepted with no body is a delivered notification')
+    or diag $f->failure;
+}
+
+{
+  my $f = $transport->_handle_notification_response(response(400, 'application/json',
+    '{"jsonrpc":"2.0","id":null,"error":{"code":-32602,"message":"Missing protocol version"}}'));
+  is($f->failure, 'MCP error -32602: Missing protocol version',
+    'a JSON-RPC error body wins over the status here too');
+}
+
+{
+  my $f = $transport->_handle_notification_response(
+    HTTP::Response->new(500, 'Internal Server Error', [ 'Content-Type' => 'text/html' ], '<html>nope</html>'));
+  like($f->failure, qr/^MCP HTTP error: 500/,
+    'a non-2xx without a usable body fails with the HTTP status line');
 }
 
 done_testing;

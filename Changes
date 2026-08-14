@@ -85,6 +85,41 @@
     notifications anyway, so over HTTP it was one extra POST per initialize
     with no effect. send_notification stays on all three transports as public
     API for callers, this client just no longer uses it
+  - Fixed the HTTP transport dying instead of failing its Future when a 2xx
+    body carries an "error" that is not a JSON-RPC error object. MCP::Server's
+    own HTTP transport renders its refusals as {error => 'Method not allowed'}
+    and {error => 'Invalid JSON'}, and a gateway in between may invent another
+    shape, all of which the JSON and SSE paths read as a hash reference and
+    died on with "Can't use string as a HASH ref". Both paths now check the
+    shape like the non-2xx path already did and fail with the text the body
+    held; a JSON-RPC error without a message no longer warns about an
+    uninitialized value while interpolating it
+  - Fixed send_notification on the HTTP transport reporting every completed
+    POST as a delivered notification, 4xx and 5xx included, so a rejected
+    notification looked sent. A 2xx still resolves the Future (202 Accepted
+    with no body is the normal case), while a non-2xx now fails it with the
+    same precedence as the request path: a JSON-RPC error body wins over the
+    HTTP status line
+  - Added the Mcp-Param-{Name} headers for tool arguments annotated with
+    x-mcp-header, the last documented gap in the HTTP binding: a conforming
+    server rejects a tools/call that passes such an argument without its
+    header, so those tools were simply uncallable over HTTP. call_tool now
+    resolves them client-side from the tool's input schema - which arguments
+    are annotated and how their values are spelled is MCP semantics, only the
+    wire form belongs to a transport - and hands the finished name/value pairs
+    to send_request, which now takes optional binding hints as trailing named
+    options and encodes them like Mcp-Name. list_tools caches the annotations
+    per tool; a call_tool for a tool the client has not seen fetches the list
+    once, and only on a transport that mirrors headers at all, which the new
+    transport method mirrors_header_params answers (true only for HTTP). A
+    failed lookup does not fail the call: it goes out without headers and the
+    server decides. Values are formatted the way the server compares them,
+    including a \0 or JSON::PP::Boolean false, which as a Perl value is true
+    and would otherwise have put "true" in a header over a body saying false.
+    An argument the caller left out gets no header, since a server rejects an
+    unexpected one exactly as it rejects a missing one. Known limitation:
+    list_tools ignores a nextCursor, so only the first page of a paginated tool
+    list is known
 
 0.003     2026-07-12 20:46:34Z
   - Fixed InProcess transport to pass a real MCP::Server::Context to

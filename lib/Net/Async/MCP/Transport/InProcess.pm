@@ -65,7 +65,8 @@ instance).
 =cut
 
 sub send_request {
-  my ( $self, $method, $params ) = @_;
+  # %options: binding hints from the client, none of which apply in process
+  my ( $self, $method, $params, %options ) = @_;
 
   my $id = ++$self->{next_id};
   my $request = {
@@ -98,6 +99,12 @@ sub send_request {
 Sends a JSON-RPC request to the MCP server by calling C<handle()> directly.
 Returns a L<Future> that resolves to the C<result> value from the response,
 or fails with an error message if the server returns a JSON-RPC error.
+
+Accepts the same optional trailing name/value options as the other transports,
+C<header_params> among them, and ignores all of them: they describe how a
+request is mirrored into HTTP headers, and this transport hands the request to
+the server as it stands. See
+L<Net::Async::MCP::Transport::HTTP/send_request>.
 
 =cut
 
@@ -144,6 +151,18 @@ sub is_alive { 1 }
 Always true: the server object lives in the same process, so there is no
 connection state that could go away. Used by L<Net::Async::MCP/ping> for its
 transport-level liveness check.
+
+=cut
+
+sub mirrors_header_params { 0 }
+
+=method mirrors_header_params
+
+    my $mirrors = $transport->mirrors_header_params;
+
+Always false: there are no HTTP headers here to mirror tool arguments
+annotated with C<x-mcp-header> into, so L<Net::Async::MCP/call_tool> resolves
+none and never fetches a tool list to do it.
 
 =cut
 

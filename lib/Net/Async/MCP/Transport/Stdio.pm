@@ -93,7 +93,8 @@ sub _add_to_loop {
 }
 
 sub send_request {
-  my ( $self, $method, $params ) = @_;
+  # %options: binding hints from the client, none of which apply on stdio
+  my ( $self, $method, $params, %options ) = @_;
 
   if ($self->{closed}) {
     return Future->fail("MCP server process has exited");
@@ -125,6 +126,11 @@ when the matching response is read from stdout, or fails with an error if the
 server returns a JSON-RPC error or the process exits.
 
 Fails immediately if the subprocess has already exited.
+
+Accepts the same optional trailing name/value options as the other transports,
+C<header_params> among them, and ignores all of them: they describe how a
+request is mirrored into HTTP headers, of which a JSON-RPC line on stdin has
+none. See L<Net::Async::MCP::Transport::HTTP/send_request>.
 
 =cut
 
@@ -193,6 +199,18 @@ sub is_alive { !$_[0]->{closed} }
 Returns true while the subprocess can still carry requests, and false once it
 has exited or L</close> has been called. Used by L<Net::Async::MCP/ping> for
 its transport-level liveness check.
+
+=cut
+
+sub mirrors_header_params { 0 }
+
+=method mirrors_header_params
+
+    my $mirrors = $transport->mirrors_header_params;
+
+Always false: a JSON-RPC line on stdin has no headers to mirror tool arguments
+annotated with C<x-mcp-header> into, so L<Net::Async::MCP/call_tool> resolves
+none and never fetches a tool list to do it.
 
 =cut
 

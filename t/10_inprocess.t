@@ -156,4 +156,118 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   ok(!exists $result->{_meta}, 'initialize does not autovivify _meta into the result');
 }
 
+# Tool arguments annotated with x-mcp-header have to be mirrored into
+# Mcp-Param-{Name} headers by the HTTP binding, and which arguments those are
+# follows from the tool's input schema. The client reads them out of the schema
+# so that every binding gets the same answer; this is the same walk
+# MCP::Tool::_header_params does on the server, whose result the server checks
+# the headers against.
+{
+  my $params = Net::Async::MCP::_header_params({
+    type       => 'object',
+    properties => {
+      service => { type => 'string' },
+      region  => { type => 'string',  'x-mcp-header' => 'Region' },
+      dry_run => { type => 'boolean', 'x-mcp-header' => 'Dry-Run' },
+      options => {
+        type       => 'object',
+        properties => {
+          label => { type => 'string', 'x-mcp-header' => 'Label' },
+          plain => { type => 'string' },
+        },
+      },
+    },
+  });
+
+  is($params, [
+    { name => 'Dry-Run', path => ['dry_run'],           type => 'boolean' },
+    { name => 'Label',   path => ['options', 'label'],  type => 'string' },
+    { name => 'Region',  path => ['region'],            type => 'string' },
+  ], 'only annotated properties are extracted, nested ones with their full path');
+
+  is(Net::Async::MCP::_header_params({ type => 'object' }), [],
+    'a schema without properties has no header params');
+  is(Net::Async::MCP::_header_params(undef), [],
+    'and neither has a tool that ships no input schema at all');
+
+  # x-mcp-header is only meaningful under a chain of "properties" keys, so an
+  # annotation anywhere else is not a header param and must not be mirrored
+  is(Net::Async::MCP::_header_params({
+    type       => 'object',
+    properties => {
+      tags => {
+        type  => 'array',
+        items => { type => 'string', 'x-mcp-header' => 'Tag' },
+      },
+    },
+  }), [], 'an annotation outside the properties chain is ignored');
+}
+
+# list_tools is what fills that cache, so a client that has listed its tools
+# knows which arguments need a header without asking again
+{
+  my $annotated = MCP::Server->new(name => 'AnnotatedServer');
+  $annotated->tool(
+    name         => 'deploy',
+    description  => 'Deploy a service',
+    input_schema => {
+      type       => 'object',
+      properties => {
+        service => { type => 'string' },
+        region  => { type => 'string', 'x-mcp-header' => 'Region' },
+      },
+    },
+    code => sub { return 'deployed' },
+  );
+  $annotated->tool(
+    name         => 'status',
+    description  => 'Report status',
+    input_schema => { type => 'object', properties => { service => { type => 'string' } } },
+    code => sub { return 'ok' },
+  );
+
+  my $client = Net::Async::MCP->new(server => $annotated);
+  $loop->add($client);
+
+  $client->list_tools->get;
+  is($client->{tool_header_params}{deploy},
+    [ { name => 'Region', path => ['region'], type => 'string' } ],
+    'list_tools caches the header params of an annotated tool');
+  is($client->{tool_header_params}{status}, [],
+    'and an empty list for a tool without annotations, so it is never looked up again');
+}
+
+# The InProcess transport has no headers to mirror anything into, so the client
+# must not spend a tools/list on resolving what it could not use anyway
+{
+  package Test::CountingServer;
+  sub new { bless { methods => [] }, shift }
+  sub handle {
+    my ( $self, $request ) = @_;
+    push @{ $self->{methods} }, $request->{method};
+    return undef unless defined $request->{id};
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => { content => [ { type => 'text', text => 'ok' } ] },
+    };
+  }
+  sub methods { $_[0]{methods} }
+}
+
+{
+  my $counting = Test::CountingServer->new;
+  my $client = Net::Async::MCP->new(server => $counting);
+  $loop->add($client);
+
+  ok(!$client->{transport}->mirrors_header_params,
+    'the InProcess transport mirrors no header params');
+
+  # A tool this client never listed: over HTTP this is what triggers the
+  # schema lookup, here it must trigger nothing but the call itself
+  $client->call_tool('never_listed', { region => 'europe-west1' })->get;
+  is($counting->methods, ['tools/call'],
+    'calling an unlisted tool sends no tools/list on a transport without headers');
+}
+
 done_testing;
