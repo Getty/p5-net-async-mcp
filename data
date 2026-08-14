@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-14T22:58:35Z
+created: 2026-08-14T22:36:07Z
+id: 15
+priority: high
+started: 2026-08-14T22:43:15Z
+status: done
+tags:
+- protocol
+- api
+title: Transports werfen den strukturierten JSON-RPC-Fehler weg
+updated: 2026-08-14T22:58:35Z
+---
+
+Alle drei Transports kollabieren den JSON-RPC-Fehler zu einem String und rufen fail() mit genau diesem einen Argument: InProcess.pm _process_response, Stdio.pm _on_stdout_read, HTTP.pm _jsonrpc_error_message. Damit sind code und error.data beim Client nicht mehr verfuegbar - error.data.supported kommt im String gar nicht erst vor, ein Regex koennte es also auch prinzipiell nicht retten. Idiomatischer Fix: Future->fail($message, mcp => $err). Der Skalar-Kontext von $f->failure bleibt byte-identisch, alle bestehenden Tests und Aufrufer laufen weiter, und der Client kann my (undef, $category, $error) = $f->failure lesen. Blockiert #7.
