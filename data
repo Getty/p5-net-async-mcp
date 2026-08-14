@@ -1,0 +1,21 @@
+---
+class: standard
+completed: 2026-08-14T04:16:40Z
+created: 2026-08-14T03:18:22Z
+id: 1
+priority: low
+started: 2026-08-14T04:16:40Z
+status: done
+tags:
+- upstream
+- reconciliation
+title: 'Upstream: Net::Async::MCP 0.003 speaks obsolete pre-_meta protocol'
+updated: 2026-08-14T04:16:40Z
+---
+
+Carried over from langertha karr ticket #63 (orignally created 2026-08-13). See langertha commit 863ab31 / karr #60 for the workaround in Langertha::MCP::Client.
+
+Net::Async::MCP 0.003 (2026-07-12) hardcodes the obsolete Rev-2025-11-25 initialize form (top-level protocolVersion) and sends no _meta on any request. Current MCP::Server 0.15 / Rev-2026-07-28 requires _meta on every request and has no initialize method (server/discover handshake).
+
+Follow-up: report upstream, watch for a fix, then revert call sites in langertha to Net::Async::MCP.
+Scope-Entscheidung: Follow-up-Teil (upstream reporten, auf Fix warten, langertha reverten) wird als separates Ticket #2 geparkt. Dieses Ticket hier behandelt nur den Reconciliation-Fix im eigenen Repo.
