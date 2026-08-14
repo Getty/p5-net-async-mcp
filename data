@@ -1,0 +1,63 @@
+---
+class: standard
+completed: 2026-08-14T23:16:03Z
+created: 2026-08-14T20:42:54Z
+depends_on:
+- 15
+id: 7
+priority: medium
+started: 2026-08-14T22:26:35Z
+status: done
+tags:
+- protocol
+title: Protokoll-Renegotiation bei UNSUPPORTED_PROTOCOL_VERSION
+updated: 2026-08-14T23:16:03Z
+---
+
+Antwortet ein Server mit UNSUPPORTED_PROTOCOL_VERSION und error.data.supported, geben wir auf. MCP::Client::_renegotiate waehlt daraus eine von SUPPORTED_VERSIONS, setzt sie im _meta und wiederholt den Request. Betrifft alle Transports, gehoert also in Net::Async::MCP, nicht in den Transport.
+
+BLOCKED (Analyse client-protocol, 2026-08-15)
+
+Nicht umsetzbar ohne Aenderung an den Transports. Alle drei kollabieren das
+JSON-RPC-Fehlerobjekt zu einem einzigen String und rufen Future->fail mit nur
+diesem einen Argument auf:
+
+  lib/Net/Async/MCP/Transport/InProcess.pm:204
+    return Future->fail("MCP error $err->{code}: $err->{message}");
+  lib/Net/Async/MCP/Transport/Stdio.pm:267
+    $future->fail("MCP error $err->{code}: $err->{message}");
+  lib/Net/Async/MCP/Transport/HTTP.pm:448-457 (_jsonrpc_error_message),
+    benutzt in :477 und :505
+
+Damit ist error.data.supported restlos weg - es steht nicht einmal im
+Meldungstext. Ein Regex auf die Meldung koennte also nicht mal den Code
+zuverlaessig zurueckholen und die Versionsliste ueberhaupt nicht. Ein Parser
+auf Meldungstexten waere hier kein Workaround, sondern ein zweiter Bug.
+
+Benoetigte Transport-Aenderung (minimal, rueckwaertskompatibel):
+Future unterstuetzt fail($message, $category, @details). Die drei Stellen
+sollten das Fehlerobjekt als Detail mitgeben, z.B.
+
+  Future->fail($message, 'mcp', $err)
+
+Die Meldung selbst bleibt byte-identisch, $f->failure im Skalarkontext aendert
+sich nicht, also bleiben alle bestehenden Tests und Aufrufer gueltig. Der
+Client liest dann my (undef, $category, $error) = $f->failure.
+
+Danach in Net::Async::MCP:
+- Renegotiation zentral in einen _send_request-Wrapper, den alle acht Methoden
+  benutzen (nicht acht Kopien).
+- Hoechstens ein Retry pro Request.
+- Beim Retry _meta neu bauen, nachdem protocol_version gesetzt wurde, und die
+  ausgehandelte Version am Client persistieren (wie MCP::Client es tut).
+- MCP::Constants ist nur 'recommends': UNSUPPORTED_PROTOCOL_VERSION (-32022)
+  und SUPPORTED_VERSIONS brauchen denselben eval-require-Fallback wie
+  PROTOCOL_VERSION oben in der Datei.
+
+Designhinweis fuer die Umsetzung: MCP::Constants definiert SUPPORTED_VERSIONS
+als [PROTOCOL_VERSION], also genau eine Version. Solange das so ist, waehlt
+eine Renegotiation nur die Version, die der Client ohnehin schon spricht, und
+MCP::Client bricht in dem Fall selbst ab (return $res if $version eq
+$self->protocol_version). Praktisch wirksam wird das Ticket also erst fuer
+einen Client mit abweichend konfiguriertem protocol_version - oder wenn wir
+unsere eigene Fallback-Liste breiter fassen als die von MCP::Constants.
