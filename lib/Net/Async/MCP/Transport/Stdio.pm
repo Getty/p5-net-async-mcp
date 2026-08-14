@@ -154,6 +154,24 @@ the subprocess stdin. Returns a L<Future> that resolves to the C<result> value
 when the matching response is read from stdout, or fails with an error if the
 server returns a JSON-RPC error or the process exits.
 
+A JSON-RPC error fails the L<Future> with more than its message. L<Future>'s
+failure convention is C<< ( $message, $category, @details ) >>, so the failure
+reads C<< ( "MCP error $code: $message", 'mcp', $error ) >>: in scalar context
+C<< ->failure >> is the message and nothing has changed, and in list context
+the raw JSON-RPC error object comes with it.
+
+    my ( $message, $category, $error ) = $future->failure;
+    if (($category // '') eq 'mcp') {
+      my $code      = $error->{code};          # -32601, -32602, ...
+      my $supported = $error->{data}{supported};
+    }
+
+The C<mcp> category marks a genuine JSON-RPC error from the server and nothing
+else. The failures this transport raises on its own - a request sent after the
+subprocess has exited, and a request still pending when it does - carry their
+message alone, so a caller that finds no category knows there is no server
+error object behind it.
+
 Fails immediately if the subprocess has already exited.
 
 Cancelling the returned L<Future> cancels the request: the pending entry is
@@ -276,8 +294,11 @@ sub _on_stdout_read {
     my $future = delete $self->{pending}{$id};
     next unless $future;
 
+    # The raw JSON-RPC error object travels with the message as the details of
+    # a failure in category "mcp", so a caller can read the code and any
+    # error->{data} the server sent instead of parsing the message for them.
     if (my $err = $response->{error}) {
-      $future->fail("MCP error $err->{code}: $err->{message}");
+      $future->fail("MCP error $err->{code}: $err->{message}", mcp => $err);
     }
     else {
       $future->done($response->{result});

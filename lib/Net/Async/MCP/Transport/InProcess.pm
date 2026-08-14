@@ -118,6 +118,24 @@ Sends a JSON-RPC request to the MCP server by calling C<handle()> directly.
 Returns a L<Future> that resolves to the C<result> value from the response,
 or fails with an error message if the server returns a JSON-RPC error.
 
+A JSON-RPC error fails the L<Future> with more than its message. L<Future>'s
+failure convention is C<< ( $message, $category, @details ) >>, so the failure
+reads C<< ( "MCP error $code: $message", 'mcp', $error ) >>: in scalar context
+C<< ->failure >> is the message and nothing has changed, and in list context
+the raw JSON-RPC error object comes with it.
+
+    my ( $message, $category, $error ) = $future->failure;
+    if (($category // '') eq 'mcp') {
+      my $code      = $error->{code};          # -32601, -32602, ...
+      my $supported = $error->{data}{supported};
+    }
+
+The C<mcp> category marks a genuine JSON-RPC error from the server and nothing
+else. The failures this transport raises on its own - a missing or unusable
+response, an async tool that rejected, and the C<subscriptions/listen> refusal
+below - carry their message alone, so a caller that finds no category knows
+there is no server error object behind it.
+
 Accepts the same optional trailing name/value options as the other transports,
 C<header_params> among them, and ignores all of them: they describe how a
 request is mirrored into HTTP headers, and this transport hands the request to
@@ -200,8 +218,12 @@ sub _process_response {
   return Future->fail("Invalid response from MCP server")
     unless ref $response eq 'HASH';
 
+  # The message alone cannot carry a code to switch on or an error->{data} to
+  # read, so the raw JSON-RPC error object travels with it as the details of a
+  # failure in category "mcp". The message stays the first element, so a caller
+  # reading the failure in scalar context sees exactly what it saw before.
   if (my $err = $response->{error}) {
-    return Future->fail("MCP error $err->{code}: $err->{message}");
+    return Future->fail("MCP error $err->{code}: $err->{message}", mcp => $err);
   }
 
   return Future->done($response->{result});

@@ -239,6 +239,25 @@ L<MCP::Server>'s own HTTP transport renders its refusals, or whatever shape a
 gateway in between invents - fails the L<Future> as well, carrying the text the
 body held.
 
+A JSON-RPC error fails the L<Future> with more than its message, wherever in
+the body or the stream it was found. L<Future>'s failure convention is
+C<< ( $message, $category, @details ) >>, so the failure reads
+C<< ( "MCP error $code: $message", 'mcp', $error ) >>: in scalar context
+C<< ->failure >> is the message and nothing has changed, and in list context
+the raw JSON-RPC error object comes with it.
+
+    my ( $message, $category, $error ) = $future->failure;
+    if (($category // '') eq 'mcp') {
+      my $code      = $error->{code};          # -32601, -32602, ...
+      my $supported = $error->{data}{supported};
+    }
+
+The C<mcp> category marks a genuine JSON-RPC error from the server and nothing
+else. The failures around it - the HTTP status line, an unreadable or
+unexpected body, the foreign C<error> shape above, and a stream that ended
+without a response - carry their message alone, so a caller that finds no
+category knows there is no server error object behind it.
+
 =cut
 
 sub send_notification {
@@ -277,7 +296,9 @@ would read.
 
 A non-2xx status fails the returned L<Future>, with the same precedence as on
 the request path: a JSON-RPC error in the body wins over the status, and only a
-body without one falls back to the HTTP status line.
+body without one falls back to the HTTP status line. Such an error carries the
+C<mcp> category and the raw error object like any other, as described under
+L</send_request>.
 
 The revision defines no header requirements for notification POSTs, so a
 notification carries whatever its body supports and nothing more: always
@@ -460,8 +481,9 @@ sub _sse_result {
     unless $data;
 
   if (defined(my $err = $data->{error})) {
-    return Future->fail($self->_jsonrpc_error_message($data)
-      // $self->_foreign_error_message($err));
+    my @failure = $self->_jsonrpc_error_failure($data);
+    return Future->fail(@failure) if @failure;
+    return Future->fail($self->_foreign_error_message($err));
   }
 
   return Future->done($data->{result});
@@ -552,8 +574,8 @@ sub _handle_response {
     # scope, 404 for METHOD_NOT_FOUND), so the body carries the real error and
     # must win over the HTTP status. Only a non-2xx without a JSON-RPC error
     # body is an HTTP-level problem.
-    if (my $error = $self->_jsonrpc_error_from_body($response)) {
-      return Future->fail($error);
+    if (my @failure = $self->_jsonrpc_error_from_body($response)) {
+      return Future->fail(@failure);
     }
 
     return Future->fail("MCP HTTP error: " . $response->status_line);
@@ -588,8 +610,8 @@ sub _handle_notification_response {
 
   return Future->done if $response->is_success;
 
-  if (my $error = $self->_jsonrpc_error_from_body($response)) {
-    return Future->fail($error);
+  if (my @failure = $self->_jsonrpc_error_from_body($response)) {
+    return Future->fail(@failure);
   }
 
   return Future->fail("MCP HTTP error: " . $response->status_line);
@@ -599,26 +621,34 @@ sub _jsonrpc_error_from_body {
   my ( $self, $response ) = @_;
 
   my $body = eval { $response->decoded_content(charset => 'none') };
-  return undef unless defined $body && length $body;
+  return () unless defined $body && length $body;
 
   my $data = eval { $self->{json}->decode($body) };
-  return $self->_jsonrpc_error_message($data);
+  return $self->_jsonrpc_error_failure($data);
 }
 
-# The failure message for a decoded body that carries a JSON-RPC error object,
-# and undef for anything else. Not every JSON error body is a JSON-RPC one: an
-# MCP server answers a bad method with {error => 'Method not allowed'}, and a
-# gateway in between may invent its own shape, so the shape is checked before
-# it is read as an object.
-sub _jsonrpc_error_message {
+# The Future->fail arguments for a decoded body that carries a JSON-RPC error
+# object, and the empty list for anything else. Not every JSON error body is a
+# JSON-RPC one: an MCP server answers a bad method with
+# {error => 'Method not allowed'}, and a gateway in between may invent its own
+# shape, so the shape is checked before it is read as an object.
+#
+# The message alone cannot carry a code to switch on or an error->{data} to
+# read, so the raw error object travels with it as the details of a failure in
+# category "mcp". The message stays the first element, so a caller reading the
+# failure in scalar context sees exactly what it saw before.
+sub _jsonrpc_error_failure {
   my ( $self, $data ) = @_;
 
-  return undef unless ref $data eq 'HASH';
+  return () unless ref $data eq 'HASH';
 
   my $err = $data->{error};
-  return undef unless ref $err eq 'HASH' && defined $err->{code};
+  return () unless ref $err eq 'HASH' && defined $err->{code};
 
-  return "MCP error $err->{code}: " . ($err->{message} // '(no message)');
+  return (
+    "MCP error $err->{code}: " . ($err->{message} // '(no message)'),
+    mcp => $err,
+  );
 }
 
 # A body that says "error" in a shape this client cannot read as JSON-RPC still
@@ -639,8 +669,9 @@ sub _handle_json_response {
   return Future->fail("MCP HTTP invalid response") unless ref $data eq 'HASH';
 
   if (defined(my $err = $data->{error})) {
-    return Future->fail($self->_jsonrpc_error_message($data)
-      // $self->_foreign_error_message($err));
+    my @failure = $self->_jsonrpc_error_failure($data);
+    return Future->fail(@failure) if @failure;
+    return Future->fail($self->_foreign_error_message($err));
   }
 
   return Future->done($data->{result});

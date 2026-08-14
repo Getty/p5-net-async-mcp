@@ -10,6 +10,14 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - A failed request now carries the server's JSON-RPC error object, not just
+    a message about it. All three transports collapsed the error into a string,
+    so a caller could not tell -32601 from -32602 without parsing prose, and
+    error.data - where a server puts the versions it supports, or the scopes it
+    wanted - never arrived at all. The failure now reads
+    ( $message, 'mcp', $error ), which leaves the message in scalar context
+    exactly as it was; the category is present only when there really is a
+    server error object behind it, never for a transport-level failure
   - Fixed the HTTP transport throwing away everything a server sends before
     its answer. An SSE response was read to the end and only then parsed, and
     the parser kept the one event that looked like the response, so the
