@@ -44,6 +44,10 @@ $loop->add($mcp);
 # The client speaks the current protocol revision by default
 is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol version');
 
+# And declares nothing it cannot serve: an empty declaration is what keeps a
+# conforming server from sending inputRequests this client could not answer.
+is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
+
 # Reconfiguring with an undefined protocol version must fall back to the
 # default instead of blanking the client: every request carries
 # protocolVersion in _meta, and MCP::Server answers a missing one with -32602.
@@ -296,6 +300,165 @@ is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol versi
   $client->call_tool('never_listed', { region => 'europe-west1' })->get;
   is($counting->methods, ['tools/call'],
     'calling an unlisted tool sends no tools/list on a transport without headers');
+}
+
+# Client capabilities are a promise to the server: it may only send an
+# inputRequest for something the client declared. Declaring them therefore has
+# to reach the server on the wire, not just sit in an accessor - a client that
+# says it does sampling and then never sends it in _meta would never be asked,
+# and one whose declaration got lost the other way round would be asked for
+# something it cannot do.
+{
+  package Test::RecordingServer;
+  sub new { bless { requests => [] }, shift }
+  sub requests { $_[0]{requests} }
+  sub handle {
+    my ( $self, $request ) = @_;
+    push @{ $self->{requests} }, $request;
+    return undef unless defined $request->{id};
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => { tools => [] },
+    };
+  }
+}
+
+{
+  my $recording = Test::RecordingServer->new;
+  my $capabilities = { sampling => {}, elicitation => {} };
+  my $client = Net::Async::MCP->new(
+    server              => $recording,
+    client_capabilities => $capabilities,
+  );
+  $loop->add($client);
+
+  is($client->client_capabilities, $capabilities,
+    'client_capabilities are readable back');
+
+  $client->list_tools->get;
+  is($recording->requests->[0]{params}{_meta}{'io.modelcontextprotocol/clientCapabilities'},
+    $capabilities, 'and travel in the _meta of a real request, not just initialize');
+
+  # Same fallback as protocol_version: blanking the attribute must not put an
+  # undef where the server expects a capabilities object.
+  $client->configure(client_capabilities => undef);
+  is($client->client_capabilities, {},
+    'undef client_capabilities falls back to an empty declaration');
+
+  $client->list_tools->get;
+  is($recording->requests->[1]{params}{_meta}{'io.modelcontextprotocol/clientCapabilities'},
+    {}, 'and the empty declaration is what goes on the wire afterwards');
+}
+
+# A server that pages its lists. MCP allows it, the installed MCP::Server never
+# does it, so seeing the second page at all needs a stub. It records the cursor
+# of every request, because appending a second page the client fetched without
+# passing the cursor back would be a different (and broken) thing entirely.
+{
+  package Test::PagingServer;
+
+  # method => [ result key, first page, second page ]
+  my %LISTS = (
+    'tools/list' => [ 'tools',
+      [ { name => 'alpha', inputSchema => { type => 'object',
+            properties => { region => { type => 'string', 'x-mcp-header' => 'Region' } } } } ],
+      [ { name => 'beta', inputSchema => { type => 'object',
+            properties => { zone => { type => 'string', 'x-mcp-header' => 'Zone' } } } } ],
+    ],
+    'prompts/list'   => [ 'prompts',   [ { name => 'first' } ], [ { name => 'second' } ] ],
+    'resources/list' => [ 'resources', [ { uri => 'file:///one' } ], [ { uri => 'file:///two' } ] ],
+  );
+
+  sub new { bless { cursors => [] }, shift }
+  sub cursors { $_[0]{cursors} }
+
+  sub handle {
+    my ( $self, $request ) = @_;
+    return undef unless defined $request->{id};
+
+    my $list = $LISTS{ $request->{method} }
+      or return { jsonrpc => '2.0', id => $request->{id},
+                  error => { code => -32601, message => 'Method not found' } };
+
+    my ( $key, @pages ) = @$list;
+    my $cursor = $request->{params}{cursor};
+    push @{ $self->{cursors} }, $cursor;
+
+    my $page = defined $cursor ? 1 : 0;
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => {
+        $key => $pages[$page],
+        $page == 0 ? ( nextCursor => 'page-2' ) : (),
+      },
+    };
+  }
+}
+
+{
+  my $paging = Test::PagingServer->new;
+  my $client = Net::Async::MCP->new(server => $paging);
+  $loop->add($client);
+
+  my $tools = $client->list_tools->get;
+  is([ map { $_->{name} } @$tools ], ['alpha', 'beta'],
+    'both pages of a paginated tool list are returned, in server order');
+  is($paging->cursors, [ undef, 'page-2' ],
+    'the first page is asked for without a cursor and the second with the one the server gave');
+
+  # The header param cache is what call_tool resolves Mcp-Param headers from,
+  # so a tool that only appears on the second page has to be in it too -
+  # otherwise pagination would fix the returned list and leave calls to
+  # late-page tools rejected by the server for a missing header.
+  is($client->{tool_header_params}{alpha},
+    [ { name => 'Region', path => ['region'], type => 'string' } ],
+    'the schema cache knows the tool from the first page');
+  is($client->{tool_header_params}{beta},
+    [ { name => 'Zone', path => ['zone'], type => 'string' } ],
+    'and the one that only exists on the second page');
+
+  is([ map { $_->{name} } @{ $client->list_prompts->get } ], ['first', 'second'],
+    'list_prompts merges its pages too');
+  is([ map { $_->{uri} } @{ $client->list_resources->get } ],
+    ['file:///one', 'file:///two'], 'and so does list_resources');
+}
+
+# A server that never advances: every page comes back with the cursor it just
+# handed out. Following that forever is not an option, and neither is stopping
+# quietly with what has arrived - a short list that looks complete is the bug
+# pagination support was added to remove.
+{
+  package Test::LoopingServer;
+  sub new { bless { requests => 0 }, shift }
+  sub requests { $_[0]{requests} }
+  sub handle {
+    my ( $self, $request ) = @_;
+    return undef unless defined $request->{id};
+    $self->{requests}++;
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => { tools => [ { name => 'again' } ], nextCursor => 'stuck' },
+    };
+  }
+}
+
+{
+  my $looping = Test::LoopingServer->new;
+  my $client = Net::Async::MCP->new(server => $looping);
+  $loop->add($client);
+
+  my $f = $client->list_tools;
+  ok($f->failure, 'a server that repeats its cursor fails the list instead of looping');
+  like($f->failure, qr/pagination/, 'and the failure says pagination is why');
+  like($f->failure, qr/stuck/, 'naming the cursor that came round again');
+
+  is($looping->requests, 2,
+    'the repeat is caught on the request that proves it, not after a page limit');
+  is($client->{tool_header_params}, undef,
+    'and a failed walk leaves no partial schema cache behind');
 }
 
 done_testing;

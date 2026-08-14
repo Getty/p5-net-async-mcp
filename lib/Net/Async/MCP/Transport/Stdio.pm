@@ -66,12 +66,24 @@ sub _add_to_loop {
 
   require IO::Async::Process;
 
+  # These callbacks end up on the process, and on the child streams the process
+  # owns, while the transport owns the process - so capturing the transport
+  # strongly here would close a cycle no refcount ever breaks, and the transport
+  # would outlive its own client. Weakening them costs nothing: as long as
+  # either callback can still fire, the loop holds the transport for us. The
+  # loop keeps its notifiers alive strongly, and taking the transport out of the
+  # loop takes the process out with it, which unwatches the child and silences
+  # both callbacks. So the weak reference is never undef where it matters; the
+  # guards below are for the DESTROY-ordering case only.
+  weaken( my $weak_self = $self );
+
   my $process = IO::Async::Process->new(
     command => $self->{command},
     stdin   => { via => 'pipe_write' },
     stdout  => {
       on_read => sub {
         my ( $stream, $buffref, $eof ) = @_;
+        my $self = $weak_self or return 0;
         $self->_on_stdout_read($buffref, $eof);
         return 0;
       },
@@ -85,6 +97,7 @@ sub _add_to_loop {
     },
     on_finish => sub {
       my ( $proc, $exitcode ) = @_;
+      my $self = $weak_self or return;
       $self->_on_finish($exitcode);
     },
   );

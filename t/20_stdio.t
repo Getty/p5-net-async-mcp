@@ -7,6 +7,7 @@ use JSON::MaybeXS;
 use Net::Async::MCP;
 use Net::Async::MCP::Transport::Stdio;
 use File::Basename qw( dirname );
+use Scalar::Util qw( weaken );
 
 my $server_script = dirname(__FILE__) . '/bin/test_mcp_server.pl';
 
@@ -153,6 +154,46 @@ $loop->add($mcp);
   is(scalar keys %{ $recorder->{pending} }, 0,
     'cancellation on a closed transport still drops the pending entry');
   $closing->get;
+}
+
+# Retention. The stdout on_read and on_finish callbacks live on the process and
+# its child streams, both of which the transport owns, so capturing the
+# transport strongly in them closes a cycle no refcount breaks: the transport
+# then outlives its own client, holding a subprocess's file handles open for as
+# long as the program runs. Nothing about this is timing-dependent - every step
+# below either blocks on a future or is synchronous - so a defined $probe here
+# means a callback took a strong reference again, not a slow machine.
+{
+  my $transport = Net::Async::MCP::Transport::Stdio->new(
+    command => [
+      $^X, '-MJSON::MaybeXS', '-e', q{
+        my $json = JSON::MaybeXS->new(utf8 => 1);
+        $| = 1;
+        while (defined(my $line = <STDIN>)) {
+          chomp $line;
+          next if $line eq '';
+          my $message = $json->decode($line);
+          next unless defined $message->{id};
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            result  => {},
+          }), "\n";
+        }
+      },
+    ],
+  );
+  $loop->add($transport);
+
+  # A round trip, so the stdout read path has actually run and not just been
+  # installed, and the process has a live child watch when close kills it.
+  $transport->send_request('ping')->get;
+  $transport->close->get;
+  $loop->remove($transport);
+
+  weaken(my $probe = $transport);
+  undef $transport;
+  is($probe, undef, 'transport is freed once closed, removed from the loop and dropped');
 }
 
 done_testing;

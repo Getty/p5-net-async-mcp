@@ -103,20 +103,22 @@ my @HTTP_KEYS = qw( headers timeout stall_timeout );
 
 sub _init {
   my ( $self, $params ) = @_;
-  for my $key (qw( server command url protocol_version ), @HTTP_KEYS) {
+  for my $key (qw( server command url protocol_version client_capabilities ), @HTTP_KEYS) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
-  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
+  $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
+  $self->{client_capabilities} //= {};
   $self->SUPER::_init($params);
 }
 
 sub configure {
   my ( $self, %params ) = @_;
   my @http = grep { exists $params{$_} } @HTTP_KEYS;
-  for my $key (qw( server command url protocol_version ), @HTTP_KEYS) {
+  for my $key (qw( server command url protocol_version client_capabilities ), @HTTP_KEYS) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
-  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
+  $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
+  $self->{client_capabilities} //= {};
 
   # A transport that already exists takes the change too: the transport is
   # built when this client joins a loop, and a bearer token that has to be
@@ -187,6 +189,28 @@ L<MCP::Server>. Sent on every request inside C<_meta>.
 
 =cut
 
+sub client_capabilities { $_[0]->{client_capabilities} }
+
+=method client_capabilities
+
+    my $caps = $mcp->client_capabilities;
+    $mcp->configure(client_capabilities => { sampling => {} });
+
+Returns (or via C<configure>/constructor argument C<client_capabilities> sets)
+the HashRef of client capabilities sent on every request inside C<_meta>.
+Defaults to C<{}>, an empty declaration, which is what a client that never
+touches this attribute keeps sending.
+
+Setting this is a B<promise>, not a hint. A conforming server may not send an
+C<inputRequest> for a capability the client did not declare, so the empty
+default is precisely what keeps a server from asking this client for anything
+it cannot do. Declaring C<sampling> or C<elicitation> here tells the server it
+may ask - and this client has no way to answer either of them yet, so such a
+request would go unanswered and the server would be left waiting. Declare a
+capability only once there is something on your side that serves it.
+
+=cut
+
 sub headers { $_[0]->{headers} }
 
 =method headers
@@ -242,7 +266,7 @@ sub _meta {
   my ( $self ) = @_;
   return {
     'io.modelcontextprotocol/protocolVersion'    => $self->{protocol_version},
-    'io.modelcontextprotocol/clientCapabilities' => {},
+    'io.modelcontextprotocol/clientCapabilities' => $self->{client_capabilities},
     'io.modelcontextprotocol/clientInfo'         => {
       name    => 'Net::Async::MCP',
       version => $VERSION,
@@ -304,8 +328,8 @@ async sub initialize {
 Performs the MCP handshake. Must be called before any other MCP method. The
 current MCP revision has replaced the old C<initialize> request with
 C<server/discover>, which this method sends, carrying the client's protocol
-version and capabilities in C<_meta>. The server responds with its capabilities
-and, in C<result._meta>, its server info.
+version and L</client_capabilities> in C<_meta>. The server responds with its
+capabilities and, in C<result._meta>, its server info.
 
 That single request is the whole handshake: no C<notifications/initialized>
 follows it. SEP-2575 removed the C<initialize>/C<initialized> pair along with
@@ -322,14 +346,53 @@ separate C<discover> entry point.
 
 =cut
 
+# Private: how many pages a list method walks before giving up. Only a cursor
+# that comes round again proves a server is looping; one that keeps changing
+# while never running out cannot be told apart from a genuinely long list, so
+# there has to be an end to it somewhere.
+my $MAX_LIST_PAGES = 100;
+
+# Private: every entry of a paginated list method, following nextCursor until
+# the server stops handing one out. $key is the result key holding the entries,
+# and each page is appended in the order the server sent it.
+#
+# Anything short of the full list is failed rather than returned. Handing back
+# the pages collected so far would be indistinguishable from a server that
+# really has that many entries, which is exactly the bug this walk exists to
+# fix - it would just move from the first page to the hundredth.
+async sub _list_all {
+  my ( $self, $method, $key ) = @_;
+
+  my ( @entries, %seen, $cursor );
+
+  for my $page ( 1 .. $MAX_LIST_PAGES ) {
+    my $result = await $self->{transport}->send_request($method,
+      $self->_with_meta(defined $cursor ? { cursor => $cursor } : undef));
+
+    push @entries, @{ $result->{$key} // [] };
+
+    $cursor = $result->{nextCursor};
+    return \@entries unless defined $cursor;
+
+    # A cursor is a position in the list, so being handed one back that was
+    # already followed means the server is not moving. Left alone that spins
+    # for as long as the server keeps answering.
+    croak "MCP $method pagination: server repeated cursor '$cursor'"
+      if $seen{$cursor}++;
+  }
+
+  croak "MCP $method pagination: server offered more than $MAX_LIST_PAGES pages";
+}
+
 async sub list_tools {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('tools/list',
-    $self->_with_meta);
-  my $tools = $result->{tools} // [];
+  my $tools = await $self->_list_all('tools/list', 'tools');
 
   # A fresh listing is the whole truth about the server's tools, so it replaces
-  # the cache rather than adding to it.
+  # the cache rather than adding to it - and the whole truth is every page,
+  # which is why this runs on the merged list once the walk is through. A walk
+  # that failed part way leaves the cache as it was instead of replacing it with
+  # what happens to have arrived.
   $self->{tool_header_params} = {
     map { $_->{name} => _header_params($_->{inputSchema}) }
     grep { ref $_ eq 'HASH' && defined $_->{name} } @$tools
@@ -349,9 +412,13 @@ Also caches, per tool, which of its arguments are annotated with
 C<x-mcp-header> in the input schema, which L</call_tool> needs to build the
 C<Mcp-Param-{Name}> headers of the HTTP binding.
 
-Pagination is not implemented: a C<nextCursor> in the result is ignored, so a
-server that pages its tool list is only seen with its first page, both in the
-returned list and in that cache.
+Paginated tool lists are walked to the end: as long as the server answers with
+a C<nextCursor>, the next page is requested with that C<cursor> and its tools
+appended, so both the returned list and the cache cover every page. Nothing
+short of the whole list is ever returned - a server that keeps handing back a
+cursor it already gave out, or that offers more than 100 pages, fails the
+returned L<Future> instead, because a quietly truncated list is the same bug
+this walk is here to fix.
 
 =cut
 
@@ -501,9 +568,7 @@ and never fetch a tool list on their own.
 
 async sub list_prompts {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('prompts/list',
-    $self->_with_meta);
-  return $result->{prompts} // [];
+  return await $self->_list_all('prompts/list', 'prompts');
 }
 
 =method list_prompts
@@ -511,6 +576,8 @@ async sub list_prompts {
     my $prompts = await $mcp->list_prompts;
 
 Returns an ArrayRef of prompt definition hashrefs from the MCP server.
+Paginated results are followed to the end and merged, on the same terms as
+L</list_tools>.
 
 =cut
 
@@ -535,9 +602,7 @@ Returns the prompt result hashref.
 
 async sub list_resources {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('resources/list',
-    $self->_with_meta);
-  return $result->{resources} // [];
+  return await $self->_list_all('resources/list', 'resources');
 }
 
 =method list_resources
@@ -545,6 +610,8 @@ async sub list_resources {
     my $resources = await $mcp->list_resources;
 
 Returns an ArrayRef of resource definition hashrefs from the MCP server.
+Paginated results are followed to the end and merged, on the same terms as
+L</list_tools>.
 
 =cut
 

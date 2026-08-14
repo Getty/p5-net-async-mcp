@@ -1,4 +1,21 @@
 {{$NEXT}}
+  - Added a client_capabilities option, so a caller can declare what the client
+    supports instead of the hardcoded empty object every request used to carry.
+    The default stays empty, which is what keeps a conforming server from
+    sending input requests this client could not answer
+  - Fixed list_tools, list_prompts and list_resources seeing only the first
+    page of a paginated listing: a nextCursor in the result was ignored, and
+    for list_tools that also left the header-parameter cache incomplete. All
+    three now follow the cursor to the end. A server that repeats a cursor, or
+    offers more than a hundred pages, fails the call loudly rather than
+    returning what happened to arrive - a truncated list is indistinguishable
+    from a short one, which is the same bug moved to a later page
+  - Fixed the Stdio transport never being reclaimed. The stdout on_read and
+    on_finish callbacks captured the transport strongly and live on the child
+    streams of the IO::Async::Process the transport itself owns, closing a
+    cycle no refcount breaks: a client that had been shut down and dropped left
+    its subprocess's stream handles held for the life of the program. Both
+    callbacks now hold the transport weakly and do nothing once it is gone
   - Added a headers option to the client and the HTTP transport, settable at
     construction and through configure, so an Authorization header can be sent
     at all: a server behind OAuth was previously unreachable, since the
