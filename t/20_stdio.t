@@ -15,10 +15,11 @@ my $mcp = Net::Async::MCP->new(
 );
 $loop->add($mcp);
 
-# Test initialize
+# Test initialize (current protocol: server/discover + _meta)
 {
   my $result = $mcp->initialize->get;
-  is($result->{serverInfo}{name}, 'TestServer', 'server name from initialize');
+  is($result->{_meta}{'io.modelcontextprotocol/serverInfo'}{name},
+    'TestServer', 'server name in result._meta serverInfo');
   ok($result->{capabilities}, 'capabilities returned');
   is($mcp->server_info->{name}, 'TestServer', 'server_info accessor');
 }

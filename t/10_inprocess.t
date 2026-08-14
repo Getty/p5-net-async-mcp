@@ -5,6 +5,7 @@ use Test2::V0;
 use IO::Async::Loop;
 use Net::Async::MCP;
 use MCP::Server;
+use MCP::Constants qw(PROTOCOL_VERSION);
 
 # Create test MCP server with tools
 my $server = MCP::Server->new(name => 'TestServer');
@@ -39,19 +40,20 @@ my $loop = IO::Async::Loop->new;
 my $mcp = Net::Async::MCP->new(server => $server);
 $loop->add($mcp);
 
-# Test initialize
+# The client speaks the current protocol revision by default
+is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol version');
+
+# Test initialize (current protocol: server/discover + _meta)
 {
   my $result = $mcp->initialize->get;
-  is($result->{serverInfo}{name}, 'TestServer', 'server name from initialize');
+  is($result->{_meta}{'io.modelcontextprotocol/serverInfo'}{name},
+    'TestServer', 'server name in result._meta serverInfo');
   ok($result->{capabilities}, 'capabilities returned');
   is($mcp->server_info->{name}, 'TestServer', 'server_info accessor');
 }
 
-# Test ping
-{
-  my $ok = $mcp->ping->get;
-  ok($ok, 'ping succeeds');
-}
+# NOTE: the current MCP revision has no JSON-RPC "ping" request (it lives at
+# the transport level), so it is not tested here.
 
 # Test list_tools
 {

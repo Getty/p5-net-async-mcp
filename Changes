@@ -1,4 +1,14 @@
 {{$NEXT}}
+  - Fixed obsolete Rev-2025-11-25 initialize protocol. initialize now sends the
+    current revision's server/discover request and carries protocol version,
+    client capabilities, and client info in _meta on every request, restoring a
+    working handshake with MCP::Server >= 0.15 / Rev-2026-07-28 (which dropped
+    the top-level protocolVersion initialize form and the initialize/ping
+    JSON-RPC methods in favor of _meta and server/discover)
+  - Added protocol_version accessor (defaults to MCP::Constants PROTOCOL_VERSION)
+    and client-side _meta injection in Net::Async::MCP; transports remain dumb
+  - server_info is now read from result._meta."io.modelcontextprotocol/serverInfo";
+    server_capabilities from result.capabilities
 
 0.003     2026-07-12 20:46:34Z
   - Fixed InProcess transport to pass a real MCP::Server::Context to

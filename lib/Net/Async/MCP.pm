@@ -84,24 +84,32 @@ L<Net::Async::MCP::Transport::HTTP>.
 =back
 
 All methods return L<Future> objects and work with L<Future::AsyncAwait>.
-Call L</initialize> first before using any other MCP methods.
+Call L</initialize> first before using any other MCP methods. It performs the
+handshake by sending the current revision's C<server/discover> request (the
+legacy C<initialize> request no longer exists in the current MCP revision),
+carrying the client's protocol version, capabilities, and info in C<_meta>.
 
 =cut
 
+my $DEFAULT_PROTOCOL_VERSION
+  = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
+
 sub _init {
   my ( $self, $params ) = @_;
-  for my $key (qw( server command url )) {
+  for my $key (qw( server command url protocol_version )) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
+  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION;
   $self->{_initialized} = 0;
   $self->SUPER::_init($params);
 }
 
 sub configure {
   my ( $self, %params ) = @_;
-  for my $key (qw( server command url )) {
+  for my $key (qw( server command url protocol_version )) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
+  $self->{protocol_version} //= $DEFAULT_PROTOCOL_VERSION if exists $params{protocol_version};
   $self->SUPER::configure(%params);
 }
 
@@ -146,6 +154,42 @@ sub _ensure_transport {
   }
 }
 
+sub protocol_version { $_[0]->{protocol_version} }
+
+=method protocol_version
+
+    my $version = $mcp->protocol_version;
+
+Returns (or via C<configure>/constructor argument C<protocol_version> sets) the
+MCP protocol revision this client speaks on the wire, such as C<'2026-07-28'>.
+Defaults to the L<MCP::Constants> C<PROTOCOL_VERSION> of the installed
+L<MCP::Server>. Sent on every request inside C<_meta>.
+
+=cut
+
+# Private: the C<_meta> fields carried on every JSON-RPC request, as required
+# by the current MCP revision.
+sub _meta {
+  my ( $self ) = @_;
+  return {
+    'io.modelcontextprotocol/protocolVersion'     => $self->{protocol_version},
+    'io.modelcontextprotocol/clientCapabilities' => {},
+    'io.modelcontextprotocol/clientInfo'          => {
+      name    => 'Net::Async::MCP',
+      version => $VERSION,
+    },
+  };
+}
+
+# Private: merge a caller's C<_meta> (if any) into the standard one, returning
+# params that carry C<_meta> on every request.
+sub _with_meta {
+  my ( $self, $params ) = @_;
+  my %params = %{ $params // {} };
+  my %meta   = (%{ $self->_meta }, %{ $params{_meta} // {} });
+  return { %params, _meta => \%meta };
+}
+
 sub server_info { $_[0]->{server_info} }
 
 =method server_info
@@ -173,17 +217,12 @@ async sub initialize {
   my ( $self ) = @_;
   $self->_ensure_transport;
 
-  my $result = await $self->{transport}->send_request('initialize', {
-    protocolVersion => '2025-11-25',
-    capabilities => {},
-    clientInfo => {
-      name    => 'Net::Async::MCP',
-      version => $VERSION,
-    },
-  });
+  my $result = await $self->{transport}->send_request('server/discover',
+    $self->_with_meta({ capabilities => {} }));
 
-  $self->{server_info} = $result->{serverInfo};
-  $self->{server_capabilities} = $result->{capabilities};
+  $self->{server_info}
+    = $result->{_meta}{'io.modelcontextprotocol/serverInfo'} // {};
+  $self->{server_capabilities} = $result->{capabilities} // {};
   $self->{_initialized} = 1;
 
   await $self->{transport}->send_notification('notifications/initialized');
@@ -195,18 +234,25 @@ async sub initialize {
 
     my $result = await $mcp->initialize;
 
-Performs the MCP initialization handshake. Must be called before any other MCP
-method. Sends protocol version and client info, then receives server info and
-capabilities.
+Performs the MCP handshake. Must be called before any other MCP method. The
+current MCP revision has replaced the old C<initialize> request with
+C<server/discover>, which this method sends, carrying the client's protocol
+version and capabilities in C<_meta>. The server responds with its capabilities
+and, in C<result._meta>, its server info.
 
-Returns a hashref with C<serverInfo> and C<capabilities> keys. Also populates
-the L</server_info> and L</server_capabilities> accessors.
+Returns the raw result hashref (C<capabilities> key, plus C<_meta> containing
+C<io.modelcontextprotocol/serverInfo>). Also populates the L</server_info> and
+L</server_capabilities> accessors.
+
+C<initialize> remains a compatibility alias for the handshake; there is no
+separate C<discover> entry point.
 
 =cut
 
 async sub list_tools {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('tools/list');
+  my $result = await $self->{transport}->send_request('tools/list',
+    $self->_with_meta);
   return $result->{tools} // [];
 }
 
@@ -221,10 +267,11 @@ hashref contains C<name>, C<description>, and C<inputSchema> keys.
 
 async sub call_tool {
   my ( $self, $name, $arguments ) = @_;
-  my $result = await $self->{transport}->send_request('tools/call', {
-    name      => $name,
-    arguments => $arguments // {},
-  });
+  my $result = await $self->{transport}->send_request('tools/call',
+    $self->_with_meta({
+      name      => $name,
+      arguments => $arguments // {},
+    }));
   return $result;
 }
 
@@ -240,7 +287,8 @@ Returns a hashref with C<content> (ArrayRef of content blocks) and C<isError>
 
 async sub list_prompts {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('prompts/list');
+  my $result = await $self->{transport}->send_request('prompts/list',
+    $self->_with_meta);
   return $result->{prompts} // [];
 }
 
@@ -254,10 +302,11 @@ Returns an ArrayRef of prompt definition hashrefs from the MCP server.
 
 async sub get_prompt {
   my ( $self, $name, $arguments ) = @_;
-  my $result = await $self->{transport}->send_request('prompts/get', {
-    name      => $name,
-    arguments => $arguments // {},
-  });
+  my $result = await $self->{transport}->send_request('prompts/get',
+    $self->_with_meta({
+      name      => $name,
+      arguments => $arguments // {},
+    }));
   return $result;
 }
 
@@ -272,7 +321,8 @@ Returns the prompt result hashref.
 
 async sub list_resources {
   my ( $self ) = @_;
-  my $result = await $self->{transport}->send_request('resources/list');
+  my $result = await $self->{transport}->send_request('resources/list',
+    $self->_with_meta);
   return $result->{resources} // [];
 }
 
@@ -286,9 +336,10 @@ Returns an ArrayRef of resource definition hashrefs from the MCP server.
 
 async sub read_resource {
   my ( $self, $uri ) = @_;
-  my $result = await $self->{transport}->send_request('resources/read', {
-    uri => $uri,
-  });
+  my $result = await $self->{transport}->send_request('resources/read',
+    $self->_with_meta({
+      uri => $uri,
+    }));
   return $result;
 }
 
@@ -303,7 +354,7 @@ hashref.
 
 async sub ping {
   my ( $self ) = @_;
-  await $self->{transport}->send_request('ping');
+  await $self->{transport}->send_request('ping', $self->_with_meta);
   return 1;
 }
 
