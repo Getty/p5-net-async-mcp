@@ -4,6 +4,7 @@ use Test2::V0;
 
 use Future;
 use IO::Async::Loop;
+use Scalar::Util qw( weaken );
 use Net::Async::MCP;
 use MCP::Server;
 use MCP::Server::Transport::HTTP;
@@ -716,6 +717,251 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   ok($f->failure, 'a handler that answers with nothing fails the call');
   like($f->failure, qr/not a HashRef/, 'saying what was expected');
   like($f->failure, qr/confirm/, 'and for which request');
+}
+
+# A server that does not speak the revision a request was made with answers
+# UNSUPPORTED_PROTOCOL_VERSION (-32022) and names the ones it does speak in
+# error.data.supported. MCP::Server never refuses a version its own
+# MCP::Constants lists, so scripting the refusal needs a stub: this one turns
+# down every request whose _meta carries a version it was not told to accept,
+# and answers the rest with the version it was asked in - which is how the
+# retry can be told from the first attempt.
+{
+  package Test::VersionServer;
+  sub new {
+    my ( $class, %args ) = @_;
+    return bless { %args, requests => [] }, $class;
+  }
+  sub requests { $_[0]{requests} }
+  sub handle {
+    my ( $self, $request ) = @_;
+    push @{ $self->{requests} }, $request;
+    return undef unless defined $request->{id};
+
+    my $version = ( $request->{params}{_meta} // {} )
+      ->{'io.modelcontextprotocol/protocolVersion'};
+
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      result  => { content => [ { type => 'text', text => "spoke $version" } ] },
+    } if defined $version && $self->{accepts}{$version};
+
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      error   => {
+        code    => -32022,
+        message => 'Unsupported protocol version',
+        data    => { supported => $self->{supported} },
+      },
+    };
+  }
+}
+
+# The refusal names a revision this client can speak, so the request is sent
+# again with it rather than handed back to the caller as a failure.
+{
+  my $server = Test::VersionServer->new(
+    accepts   => { PROTOCOL_VERSION() => 1 },
+    supported => [ PROTOCOL_VERSION ],
+  );
+  my $client = Net::Async::MCP->new(
+    server           => $server,
+    protocol_version => '2024-11-05',
+  );
+  $loop->add($client);
+
+  my $result = $client->call_tool('echo', { message => 'hi' })->get;
+  is($result->{content}[0]{text}, 'spoke ' . PROTOCOL_VERSION,
+    'a refused protocol version is renegotiated and the caller sees the result');
+
+  my @calls = @{ $server->requests };
+  is(scalar @calls, 2, 'which took exactly one retry');
+
+  my $key = 'io.modelcontextprotocol/protocolVersion';
+  is($calls[0]{params}{_meta}{$key}, '2024-11-05',
+    'the first attempt carried the version the client was configured with');
+  is($calls[1]{params}{_meta}{$key}, PROTOCOL_VERSION,
+    'and the retry the one just agreed on, not the refused one again');
+  is($calls[1]{params}{arguments}, { message => 'hi' },
+    'otherwise repeating the original request');
+
+  is($client->protocol_version, PROTOCOL_VERSION,
+    'the agreed version is kept on the client');
+
+  # Kept, not rediscovered: a version renegotiated per request would pay for
+  # the refusal again on every single one of them.
+  $client->read_resource('file:///one')->get;
+  is(scalar @{ $server->requests }, 3, 'so a later request is not renegotiated again');
+  is($server->requests->[2]{params}{_meta}{$key}, PROTOCOL_VERSION,
+    'it goes out with the agreed version straight away');
+}
+
+# A server that refuses the very version it offered has a problem of its own,
+# and one this client cannot fix by asking a third time. Note that with a
+# single usable revision the guard against retrying the version already being
+# spoken would stop this too - both agree that the second refusal is final.
+{
+  my $server = Test::VersionServer->new(
+    accepts   => {},
+    supported => [ PROTOCOL_VERSION ],
+  );
+  my $client = Net::Async::MCP->new(
+    server           => $server,
+    protocol_version => '2024-11-05',
+  );
+  $loop->add($client);
+
+  my $f = $client->call_tool('echo', { message => 'hi' });
+  ok($f->failure, 'a second refusal after the switch reaches the caller');
+  like($f->failure, qr/-32022/, 'as the error the server sent');
+  is(scalar @{ $server->requests }, 2,
+    'and the request is retried exactly once, never in a loop');
+}
+
+# None of the offered revisions is one this client speaks, so there is nothing
+# to retry with. What the caller gets then has to be the server's own error,
+# because everything it could act on - the code, and the versions it would
+# accept - is in there and in nothing this client could write instead.
+{
+  my $server = Test::VersionServer->new(
+    accepts   => {},
+    supported => [ '1999-01-01' ],
+  );
+  my $client = Net::Async::MCP->new(
+    server           => $server,
+    protocol_version => '2024-11-05',
+  );
+  $loop->add($client);
+
+  my $f = $client->call_tool('echo', { message => 'hi' });
+  my ( $message, $category, $error ) = $f->failure;
+  is($message, 'MCP error -32022: Unsupported protocol version',
+    'an unusable offer leaves the server error unchanged');
+  is($category, 'mcp', 'still categorised as the server error it is');
+  is($error->{data}{supported}, ['1999-01-01'],
+    'and still carrying the versions the server named');
+
+  is(scalar @{ $server->requests }, 1, 'nothing was retried');
+  is($client->protocol_version, '2024-11-05',
+    'and the client kept the version it was configured with');
+}
+
+# The two retries this client knows about, meeting on one request: a server
+# that first asks for input, then refuses the revision the answer came back in,
+# and only then answers. What the renegotiated attempt carries has to be the
+# round trip as it stands - the version just agreed on and the answer already
+# given - and not the request as it was first made.
+{
+  package Test::MixedServer;
+  sub new {
+    my ( $class, %args ) = @_;
+    return bless { %args, requests => [], answered => 0 }, $class;
+  }
+  sub requests { $_[0]{requests} }
+  sub handle {
+    my ( $self, $request ) = @_;
+    push @{ $self->{requests} }, $request;
+    return undef unless defined $request->{id};
+
+    my %response = ( jsonrpc => '2.0', id => $request->{id} );
+    my $nth      = ++$self->{answered};
+
+    return { %response, result => {
+      resultType    => 'input_required',
+      requestState  => 'STATE-1',
+      inputRequests => { confirm => { method => 'elicitation/create', params => {} } },
+    } } if $nth == 1;
+
+    return { %response, error => {
+      code    => -32022,
+      message => 'Unsupported protocol version',
+      data    => { supported => $self->{supported} },
+    } } if $nth == 2;
+
+    return { %response, result => { content => [ { type => 'text', text => 'done' } ] } };
+  }
+}
+
+{
+  my $server = Test::MixedServer->new(supported => [ PROTOCOL_VERSION ]);
+  my $asked  = 0;
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    protocol_version    => '2024-11-05',
+    client_capabilities => { elicitation => {} },
+    on_input_request    => sub { $asked++; return { action => 'accept' } },
+  );
+  $loop->add($client);
+
+  my $result = $client->call_tool('confirm_me', {})->get;
+  is($result->{content}[0]{text}, 'done',
+    'an input_required round and a renegotiation on one request still end in the result');
+  is(scalar @{ $server->requests }, 3, 'in three attempts, one for each');
+
+  my $last = $server->requests->[2]{params};
+  is($last->{_meta}{'io.modelcontextprotocol/protocolVersion'}, PROTOCOL_VERSION,
+    'the renegotiated attempt carries the version just agreed on');
+  is($last->{inputResponses}{confirm}, { action => 'accept' },
+    'and the answer that was already given');
+  is($last->{requestState}, 'STATE-1', 'with the state that answer belongs to');
+  is($asked, 1, 'so the handler is not troubled a second time for the same question');
+}
+
+# What a client does with an on_notification of its own can only be seen on a
+# transport that delivers notifications, and that is the HTTP one - which needs
+# Net::Async::HTTP, a recommendation of this distribution rather than a
+# requirement. No request goes out for any of this; only the client side of the
+# handler is under test.
+if ( eval { require Net::Async::HTTP; 1 } ) {
+
+  # on_notification is invoked by the transport, which would call a handler
+  # handed over as it stands with the transport as its first argument, while
+  # on_input_request - same client, same public API - is called with the
+  # client. Invoking the event is exactly what an arriving notification does,
+  # so nothing has to arrive to see which object the handler is called with.
+  {
+    my @seen;
+    my $client = Net::Async::MCP->new(
+      url             => 'http://mcp.invalid/mcp',
+      on_notification => sub { push @seen, [ @_ ] },
+    );
+    $loop->add($client);
+
+    my $notification = { method => 'notifications/progress', params => { progress => 1 } };
+    $client->{transport}->maybe_invoke_event(on_notification => $notification);
+
+    is(scalar @seen, 1, 'a handler set on the client is called for a notification');
+    is($seen[0][0], exact_ref($client),
+      'with the client as first argument, like every other event of this client');
+    is($seen[0][1], $notification, 'and the notification as it arrived');
+  }
+
+  # Whatever reaches the transport's event slot is held by the transport, which
+  # the client holds in turn, so a handler holding the client strongly would
+  # keep both alive for as long as the process runs.
+  {
+    my $client = Net::Async::MCP->new(
+      url             => 'http://mcp.invalid/mcp',
+      on_notification => sub { },
+    );
+    $loop->add($client);
+
+    # Deliberately kept: the transport outliving this scope is what makes the
+    # question sharp, since it is the transport that holds the handler.
+    my $transport = $client->{transport};
+
+    weaken( my $weak_client = $client );
+    $loop->remove($client);
+    undef $client;
+
+    is($weak_client, undef,
+      'a client with an on_notification is still freed once the loop lets go of it');
+  }
+}
+else {
+  note 'Net::Async::HTTP is not installed, skipping the on_notification checks';
 }
 
 done_testing;

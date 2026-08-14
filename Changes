@@ -10,6 +10,18 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - A server refusing the client's protocol version is now answered by
+    switching to one it offers and sending the request again, once, with the
+    agreed version kept for everything that follows. Previously the refusal
+    went straight to the caller. An offer this client cannot use leaves the
+    server's own error untouched rather than replacing it. Note the reach of
+    this: the client speaks exactly one revision's request shapes, so it can
+    only ever switch back to that one - this catches a stale or mistaken
+    protocol_version, it does not make the client multi-revision
+  - on_notification set on the client is now invoked with the client as its
+    first argument, like on_input_request, instead of with the transport that
+    happened to receive the notification. A handler set directly on a transport
+    object is still that transport's own event and still gets the transport
   - Added support for input required results, the current revision's way of
     letting a server ask the client something mid-request (MRTR, SEP-2322):
     instead of sending the client a request of its own, a server answers with

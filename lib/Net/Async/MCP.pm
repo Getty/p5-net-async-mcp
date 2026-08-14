@@ -7,7 +7,7 @@ use parent 'IO::Async::Notifier';
 
 use Future::AsyncAwait;
 use Carp qw( croak );
-use Scalar::Util qw( blessed looks_like_number );
+use Scalar::Util qw( blessed looks_like_number weaken );
 
 our $VERSION = '0.004';
 
@@ -95,6 +95,19 @@ carrying the client's protocol version, capabilities, and info in C<_meta>.
 my $DEFAULT_PROTOCOL_VERSION
   = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
 
+# The code a server answers a request made in a revision it does not speak
+# with, and the revisions this client could switch to instead. Both come from
+# L<MCP::Constants> where it is installed - it is only recommended, not
+# required - and fall back to the one revision this client is known to speak.
+my $UNSUPPORTED_PROTOCOL_VERSION
+  = eval { require MCP::Constants; MCP::Constants::UNSUPPORTED_PROTOCOL_VERSION() }
+  // -32022;
+
+my @SUPPORTED_PROTOCOL_VERSIONS = do {
+  my $versions = eval { require MCP::Constants; MCP::Constants::SUPPORTED_VERSIONS() };
+  ref $versions eq 'ARRAY' && @$versions ? @$versions : ($DEFAULT_PROTOCOL_VERSION);
+};
+
 # The settings this client keeps to itself, whichever transport it ends up
 # with.
 my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
@@ -128,12 +141,46 @@ sub configure {
   # A transport that already exists takes the change too: the transport is
   # built when this client joins a loop, and a bearer token that has to be
   # rotated arrives long after that.
-  $self->{transport}->configure(map { $_ => $self->{$_} } @http)
+  $self->{transport}->configure($self->_transport_params(@http))
     if @http
     && $self->{transport}
     && $self->{transport}->isa('Net::Async::MCP::Transport::HTTP');
 
   $self->SUPER::configure(%params);
+}
+
+# Private: the named settings as the transport takes them. All of them travel
+# as they stand except on_notification, which the transport would otherwise
+# invoke with itself - see _notification_handler.
+sub _transport_params {
+  my ( $self, @keys ) = @_;
+  my %params = map { $_ => $self->{$_} } @keys;
+  $params{on_notification} = $self->_notification_handler
+    if exists $params{on_notification};
+  return %params;
+}
+
+# Private: the on_notification handed to the transport. It is the transport
+# that receives a notification and invokes the event, so a handler passed on as
+# it stands would be called with the transport, while every other event of this
+# client is called with the client. This wrapper puts the client back in front,
+# and leaves the choice of handler to the client's own event dispatch, so a
+# subclass method serves as well as a configured code ref.
+#
+# The client holds the transport, so what the transport holds must not hold the
+# client: a strong reference in here would close the cycle. It is never undef
+# where it matters - a transport that can still deliver anything is in a loop,
+# and the loop holds the client that holds it.
+sub _notification_handler {
+  my ( $self ) = @_;
+  return undef unless $self->can_event('on_notification');
+
+  weaken( my $weak_self = $self );
+  return sub {
+    my ( undef, @args ) = @_;
+    my $client = $weak_self or return;
+    return $client->maybe_invoke_event(on_notification => @args);
+  };
 }
 
 sub _add_to_loop {
@@ -170,8 +217,12 @@ sub _ensure_transport {
       url => $self->{url},
       # Only the keys the caller actually gave: handing over a stall_timeout of
       # undef for one that was never set would switch off the transport's
-      # default instead of leaving it alone.
-      map { $_ => $self->{$_} } grep { exists $self->{$_} } @HTTP_KEYS,
+      # default instead of leaving it alone. on_notification is asked for by
+      # event rather than by key, because a subclass method of that name is a
+      # handler just as much as a configured code ref is.
+      $self->_transport_params(grep {
+        $_ eq 'on_notification' ? $self->can_event($_) : exists $self->{$_}
+      } @HTTP_KEYS),
     );
     $self->{transport} = $transport;
     $self->add_child($transport);
@@ -191,6 +242,17 @@ Returns (or via C<configure>/constructor argument C<protocol_version> sets) the
 MCP protocol revision this client speaks on the wire, such as C<'2026-07-28'>.
 Defaults to the L<MCP::Constants> C<PROTOCOL_VERSION> of the installed
 L<MCP::Server>. Sent on every request inside C<_meta>.
+
+A server that does not speak this revision answers with
+C<UNSUPPORTED_PROTOCOL_VERSION> (-32022) and names the ones it does. Where one
+of those is a revision this client speaks too - the C<SUPPORTED_VERSIONS> of
+L<MCP::Constants> - the request goes out again in it, and this attribute keeps
+it, so every following request carries the agreed revision from the start.
+
+Nothing beyond that one retry: a refusal that offers no usable revision, and a
+second refusal after the switch, both reach the caller as the server's own
+error with its code and C<data>, because the revisions it named are in there
+and in nothing this client could put in its place.
 
 =cut
 
@@ -283,11 +345,15 @@ C<notifications/progress> of a long C<tools/call> is the usual reason to want
 one, and it is only worth anything while that call is still running, which is
 why it is an event and not part of the L<Future> the call resolves with.
 
-Handed straight to the transport, so it can be set through C<new> or
-C<configure> like any other of them; configuring it on a client that is already
-in a loop reaches the transport it built. Note that the first argument is then
-that transport rather than this client, since it is the transport that invokes
-the event.
+Set it through C<new> or C<configure> like any other event, or implement a
+method of this name in a subclass; configuring it on a client that is already
+in a loop reaches the transport it built. The first argument is this client,
+the same as L</on_input_request> and every other event here gets, even though
+it is the transport that receives the notification and starts the call.
+
+A handler set directly on a transport object rather than here is that
+transport's own event and is called with the transport - see
+L<Net::Async::MCP::Transport::HTTP/on_notification>.
 
 Only the HTTP transport delivers notifications today. The Stdio transport still
 drops the ones its server sends, and the InProcess transport has no way to
@@ -423,17 +489,73 @@ sub _with_meta {
 # at a final result would keep this going for as long as it feels like.
 my $MAX_INPUT_ROUNDS = 8;
 
+# Private: the protocol revision to send a refused request again with, or undef
+# if there is none. A server that does not speak the revision a request was
+# made with answers UNSUPPORTED_PROTOCOL_VERSION and lists the ones it does
+# speak in error.data.supported, newest first; the first of those this client
+# speaks too is the one to switch to.
+sub _renegotiated_version {
+  my ( $self, $failed ) = @_;
+
+  my ( undef, $category, $error ) = $failed->failure;
+  return undef unless ( $category // '' ) eq 'mcp' && ref $error eq 'HASH';
+  return undef unless ( $error->{code} // 0 ) == $UNSUPPORTED_PROTOCOL_VERSION;
+
+  my $supported = ref $error->{data} eq 'HASH' ? $error->{data}{supported} : undef;
+  return undef unless ref $supported eq 'ARRAY';
+
+  my %usable = map { $_ => 1 } @SUPPORTED_PROTOCOL_VERSIONS;
+  for my $version (@$supported) {
+    next unless defined $version && !ref $version && $usable{$version};
+
+    # The one offer that is no answer: the request that was just refused
+    # carried this very version, so sending it again would be sending the same
+    # request twice and getting the same refusal back.
+    return undef if $version eq $self->{protocol_version};
+    return $version;
+  }
+
+  return undef;
+}
+
 # Private: one MCP request, from a method's own params to the final result.
 # Every method goes through here, because this is the one place that holds what
-# is true of all of them: the _meta every request carries, and the
-# input_required round trips a result may take before it is one.
+# is true of all of them: the _meta every request carries, the input_required
+# round trips a result may take before it is one, and the one retry a refused
+# protocol version is worth.
 async sub _request {
   my ( $self, $method, $params, %options ) = @_;
 
-  my ( %retry, $rounds );
+  my ( %retry, $rounds, $renegotiated );
   while ( 1 ) {
-    my $result = await $self->{transport}->send_request($method,
-      $self->_with_meta({ %{ $params // {} }, %retry }), %options);
+    # Awaited as a completed Future rather than for its value: a failure has
+    # more to it than its message, and the server's error object - which is
+    # where a refused version names the ones it would accept instead - travels
+    # as the failure's details.
+    my $answered = await $self->{transport}->send_request($method,
+      $self->_with_meta({ %{ $params // {} }, %retry }), %options)
+      ->followed_by(sub { Future->done( $_[0] ) });
+
+    if ( $answered->is_failed ) {
+      my $version = $renegotiated ? undef : $self->_renegotiated_version($answered);
+
+      # Nothing to switch to, or one switch already made - which makes a second
+      # refusal the server's problem and not one more version away from being
+      # solved. Either way the server's own error is what the caller gets, code
+      # and data and all, rather than a summary of it written here.
+      return await $answered unless defined $version;
+
+      # Kept on the client, not just used for the retry: every following
+      # request would otherwise pay for the same refusal again. The _meta at
+      # the top of this loop is built afresh, so the retry carries the version
+      # agreed on here and the answers of any input_required round already
+      # walked.
+      $renegotiated = 1;
+      $self->{protocol_version} = $version;
+      next;
+    }
+
+    my $result = $answered->get;
 
     return $result
       unless ref $result eq 'HASH'
