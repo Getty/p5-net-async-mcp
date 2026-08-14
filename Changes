@@ -76,6 +76,15 @@
   - ping is now a transport-level liveness no-op (the current MCP revision has
     no client-addressable JSON-RPC ping request); it returns success without
     sending a request that would fail against MCP::Server >= 0.15
+  - Removed the notifications/initialized notification initialize used to send
+    after the handshake request: it now sends server/discover and nothing else.
+    SEP-2575 removed the initialize/initialized handshake in revision
+    2026-07-28, the Streamable HTTP binding of that revision defines no
+    client-to-server notification at all (notifications/cancelled, the only one
+    left in the core protocol, exists on stdio), and MCP::Server discards
+    notifications anyway, so over HTTP it was one extra POST per initialize
+    with no effect. send_notification stays on all three transports as public
+    API for callers, this client just no longer uses it
 
 0.003     2026-07-12 20:46:34Z
   - Fixed InProcess transport to pass a real MCP::Server::Context to

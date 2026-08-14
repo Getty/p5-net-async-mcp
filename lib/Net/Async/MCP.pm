@@ -84,7 +84,7 @@ both JSON and SSE responses. See L<Net::Async::MCP::Transport::HTTP>.
 
 All methods return L<Future> objects and work with L<Future::AsyncAwait>.
 Call L</initialize> first before using any other MCP methods. It performs the
-handshake by sending the current revision's C<server/discover> request (the
+handshake with a single C<server/discover> request of the current revision (the
 legacy C<initialize> request no longer exists in the current MCP revision),
 carrying the client's protocol version, capabilities, and info in C<_meta>.
 
@@ -223,8 +223,6 @@ async sub initialize {
   $self->{server_info} = $meta->{'io.modelcontextprotocol/serverInfo'} // {};
   $self->{server_capabilities} = $result->{capabilities} // {};
 
-  await $self->{transport}->send_notification('notifications/initialized');
-
   return $result;
 }
 
@@ -237,6 +235,12 @@ current MCP revision has replaced the old C<initialize> request with
 C<server/discover>, which this method sends, carrying the client's protocol
 version and capabilities in C<_meta>. The server responds with its capabilities
 and, in C<result._meta>, its server info.
+
+That single request is the whole handshake: no C<notifications/initialized>
+follows it. SEP-2575 removed the C<initialize>/C<initialized> pair along with
+the C<initialize> request itself, and the Streamable HTTP binding of this
+revision defines no client-to-server notifications at all, so the follow-up
+would have been an extra POST that no conforming server acts on.
 
 Returns the raw result hashref (C<capabilities> key, plus C<_meta> containing
 C<io.modelcontextprotocol/serverInfo>). Also populates the L</server_info> and

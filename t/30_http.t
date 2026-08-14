@@ -121,14 +121,24 @@ sub decoded_name {
     'and decodes back to the literal name, not to its inner value');
 }
 
-# Net::Async::MCP::initialize sends notifications/initialized without any
-# params. There is no protocol version to mirror then, and inventing one would
-# be worse than sending none
+# send_notification stays public transport API, but this distribution calls it
+# nowhere any more: the handshake lost its initialized step, and the Streamable
+# HTTP binding of this revision defines no client-to-server notification at all
+# (notifications/cancelled, used here as the shape a caller would send, lives
+# on stdio). _standard_headers still has to build headers for whatever a caller
+# passes, and a notification body carries no _meta, so there is no protocol
+# version to mirror - inventing one would be worse than sending none
 {
-  my $h = headers('notifications/initialized', undef);
-  is($h->{'Mcp-Method'}, 'notifications/initialized',
-    'a notification without params still names its method');
+  my $h = headers('notifications/cancelled', { requestId => 7 });
+  is($h->{'Mcp-Method'}, 'notifications/cancelled',
+    'a notification names its method like any other POST');
   ok(!exists $h->{'MCP-Protocol-Version'},
+    'no MCP-Protocol-Version header for a notification body without _meta');
+
+  my $bare = headers('notifications/cancelled', undef);
+  is($bare->{'Mcp-Method'}, 'notifications/cancelled',
+    'and still does so when called without params at all');
+  ok(!exists $bare->{'MCP-Protocol-Version'},
     'no MCP-Protocol-Version header without params to take it from');
 
   my $no_meta = headers('tools/list', {});

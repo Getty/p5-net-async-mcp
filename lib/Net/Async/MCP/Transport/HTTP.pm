@@ -217,9 +217,10 @@ sub _standard_headers {
     'Accept'       => 'application/json, text/event-stream',
   );
 
-  # Absent for a request built without _meta, and for the parameterless
-  # notifications/initialized. Sending a made up version would be worse than
-  # sending none: the server only compares what it gets.
+  # Absent for a request built without _meta, and for a notification sent
+  # through send_notification with no params at all - this client sends none
+  # itself, but the method stays open to callers. Sending a made up version
+  # would be worse than sending none: the server only compares what it gets.
   my $version = ($params->{_meta} // {})->{'io.modelcontextprotocol/protocolVersion'};
   push @headers, 'MCP-Protocol-Version' => $version if defined $version;
 
