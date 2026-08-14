@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T22:24:35Z
+created: 2026-08-14T20:43:11Z
+id: 10
+priority: medium
+started: 2026-08-14T20:44:29Z
+status: done
+tags:
+- http
+title: 'HTTP: kein Timeout auf Net::Async::HTTP'
+updated: 2026-08-14T22:24:35Z
+---
+
+Net::Async::HTTP wird ohne timeout/stall_timeout erzeugt. Ein haengender Server haengt den Aufrufer unbegrenzt. Sinnvollen Default setzen und konfigurierbar machen - zusammen mit dem Header-Ticket zu loesen, da beide dieselbe Durchreiche vom Client zum Transport brauchen.
