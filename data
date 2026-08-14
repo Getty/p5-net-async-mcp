@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-14T22:24:24Z
+created: 2026-08-14T20:42:37Z
+id: 4
+priority: critical
+started: 2026-08-14T20:44:23Z
+status: done
+tags:
+- http
+- api
+title: 'HTTP: eigene Header konfigurierbar machen (Auth)'
+updated: 2026-08-14T22:24:24Z
+---
+
+Transport::HTTP baut seine Header-Liste komplett selbst; ein Aufrufer kann nichts ergaenzen. Damit ist kein Authorization/Bearer moeglich, ein entfernter MCP-Server hinter OAuth ist mit diesem Transport nicht erreichbar. MCP::Client hat dafuer ein headers-Attribut als Vorbild. Muss ueber Net::Async::MCP durchgereicht werden (Konstruktor/configure), da der Transport intern erzeugt wird.
