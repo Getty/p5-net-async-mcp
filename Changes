@@ -10,6 +10,21 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Added support for input required results, the current revision's way of
+    letting a server ask the client something mid-request (MRTR, SEP-2322):
+    instead of sending the client a request of its own, a server answers with
+    resultType input_required, and the client fulfils what it asks and retries.
+    The new on_input_request handler is invoked with the method and params of
+    each ask and returns the answer, directly or as a Future; the retry then
+    carries the answers under the server's own keys and mirrors requestState
+    back untouched. An ask for a capability that was not declared in
+    client_capabilities is refused as a server violation without ever reaching
+    the handler, and an ask with no handler set fails saying so rather than
+    handing back a result that would look like an empty answer
+  - Added on_notification to the client, which only the HTTP transport had
+    since it started reading SSE incrementally, so nobody using the client
+    rather than the transport directly could reach it. The Stdio transport
+    still drops what its server sends
   - A failed request now carries the server's JSON-RPC error object, not just
     a message about it. All three transports collapsed the error into a string,
     so a caller could not tell -32601 from -32602 without parsing prose, and

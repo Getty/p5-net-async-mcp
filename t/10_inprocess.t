@@ -2,6 +2,7 @@ use strict;
 use warnings;
 use Test2::V0;
 
+use Future;
 use IO::Async::Loop;
 use Net::Async::MCP;
 use MCP::Server;
@@ -459,6 +460,262 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
     'the repeat is caught on the request that proves it, not after a page limit');
   is($client->{tool_header_params}, undef,
     'and a failed walk leaves no partial schema cache behind');
+}
+
+# SEP-2322 lets a server answer with an input_required result instead of a
+# final one, asking the client for something and to call again. MCP::Server
+# only produces one from a primitive that returns MCP::Primitive::input_required
+# itself, so scripting the exchange needs a stub: it answers each request with
+# the next result on its list, repeats the last one for as long as it is asked,
+# and keeps every request it saw - the retry is the whole point, so what it
+# carries is what has to be checked.
+{
+  package Test::InputServer;
+  sub new {
+    my ( $class, @results ) = @_;
+    return bless { results => \@results, requests => [] }, $class;
+  }
+  sub requests { $_[0]{requests} }
+  sub handle {
+    my ( $self, $request ) = @_;
+    push @{ $self->{requests} }, $request;
+    return undef unless defined $request->{id};
+    my $result = @{ $self->{results} } > 1
+      ? shift @{ $self->{results} }
+      : $self->{results}[0];
+    return { jsonrpc => '2.0', id => $request->{id}, result => $result };
+  }
+}
+
+# An input_required result with a requestState and nothing else asks for
+# nothing but the call again. The state is sealed and bound by the server, so
+# the only correct thing to do with it is hand it back exactly as it arrived.
+{
+  my $state  = 'eyJwYXlsb2FkIjp7Im5hbWUiOiJlZGdlIn19.c2lnbmF0dXJl';
+  my $server = Test::InputServer->new(
+    { resultType => 'input_required', requestState => $state },
+    { content => [ { type => 'text', text => 'deleted' } ] },
+  );
+
+  my $asked = 0;
+  my $client = Net::Async::MCP->new(
+    server           => $server,
+    on_input_request => sub { $asked++; return { action => 'accept' } },
+  );
+  $loop->add($client);
+
+  my $result = $client->call_tool('delete_release', { name => 'edge' })->get;
+  is($result->{content}[0]{text}, 'deleted',
+    'the caller sees the final result, not the input_required on the way to it');
+
+  my @calls = @{ $server->requests };
+  is(scalar @calls, 2, 'which took exactly one retry');
+  is($calls[1]{params}{requestState}, $state,
+    'the retry mirrors the requestState back unchanged');
+  is($calls[1]{params}{name}, 'delete_release',
+    'and repeats the original request rather than sending a bare retry');
+  is($calls[1]{params}{arguments}, { name => 'edge' }, 'arguments included');
+  ok(!exists $calls[1]{params}{inputResponses},
+    'a result that asked for no input is answered with no inputResponses');
+  ok(!exists $calls[0]{params}{requestState},
+    'and the first attempt carried no state at all');
+  is($asked, 0, 'a pure retry never troubles the input request handler');
+}
+
+# The other half: a result that names what it wants. Each request goes to
+# on_input_request under the method it asks for, and the answers go back under
+# the keys the server chose - those keys are how the server reads its own
+# responses back, so getting them wrong loses the answer entirely.
+{
+  my $server = Test::InputServer->new(
+    {
+      resultType    => 'input_required',
+      requestState  => 'STATE-1',
+      inputRequests => {
+        confirm => {
+          method => 'elicitation/create',
+          params => {
+            message         => 'Really delete edge?',
+            requestedSchema => { type => 'object' },
+          },
+        },
+        pick => {
+          method => 'sampling/createMessage',
+          params => { messages => [ { role => 'user' } ] },
+        },
+      },
+    },
+    { content => [ { type => 'text', text => 'deleted' } ] },
+  );
+
+  my @asked;
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    client_capabilities => { elicitation => {}, sampling => {} },
+    on_input_request    => sub {
+      my ( $mcp, $method, $params ) = @_;
+      push @asked, [ $mcp, $method, $params ];
+
+      # A handler that has to go and ask someone answers with a Future, which
+      # is the whole reason this client waits for one.
+      return Future->done({ action => 'accept', content => { ok => \1 } })
+        if $method eq 'elicitation/create';
+      return { role => 'assistant', content => { type => 'text', text => 'edge' } };
+    },
+  );
+  $loop->add($client);
+
+  my $result = $client->call_tool('delete_release', { name => 'edge' })->get;
+  is($result->{content}[0]{text}, 'deleted',
+    'the round trip ends in the final result');
+
+  is([ map { $_->[1] } @asked ], [ 'elicitation/create', 'sampling/createMessage' ],
+    'every input request reaches the handler, named by the method it asks for');
+  is($asked[0][0], exact_ref($client), 'called with the client as first argument');
+  is($asked[0][2]{message}, 'Really delete edge?',
+    'and with the params of that very request');
+
+  my $retry = $server->requests->[1]{params};
+  is($retry->{inputResponses}, {
+    confirm => { action => 'accept', content => { ok => \1 } },
+    pick    => { role => 'assistant', content => { type => 'text', text => 'edge' } },
+  }, 'the answers travel back under the keys the server asked by');
+  is($retry->{requestState}, 'STATE-1', 'alongside the state, still untouched');
+}
+
+# Nothing about this is specific to tools/call - it sits in the one place every
+# request goes through - and a result without a requestState must be retried
+# without one rather than with an empty or undefined key.
+{
+  my $server = Test::InputServer->new(
+    {
+      resultType    => 'input_required',
+      inputRequests => { confirm => { method => 'elicitation/create', params => {} } },
+    },
+    { messages => [ { role => 'user' } ] },
+  );
+
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    client_capabilities => { elicitation => {} },
+    on_input_request    => sub { return { action => 'accept' } },
+  );
+  $loop->add($client);
+
+  my $result = $client->get_prompt('review', { file => 'x.pm' })->get;
+  is($result->{messages}[0]{role}, 'user', 'get_prompt walks the round trip too');
+
+  my $retry = $server->requests->[1]{params};
+  ok(!exists $retry->{requestState},
+    'a result without a requestState is retried without one');
+  is($retry->{inputResponses}{confirm}, { action => 'accept' },
+    'and the answer is still there');
+  is($retry->{name}, 'review', 'on top of the original params of prompts/get');
+}
+
+# A server may legitimately ask again after being answered, so the retry is a
+# loop - and a loop needs an end. Handing back what has arrived is not one:
+# an input_required result looks to a caller like a final result whose content
+# went missing.
+{
+  my $server = Test::InputServer->new(
+    { resultType => 'input_required', requestState => 'never-ending' },
+  );
+  my $client = Net::Async::MCP->new(server => $server);
+  $loop->add($client);
+
+  my $f = $client->call_tool('forever', {});
+  ok($f->failure, 'a server that never stops asking fails the call');
+  like($f->failure, qr/input_required more than 8 times/,
+    'and the failure says how far it was followed');
+  is(scalar @{ $server->requests }, 9,
+    'which is eight retries after the original request, and then no more');
+}
+
+# inputRequests with nothing to answer them. Passing the input_required result
+# back to the caller instead would be the same silence, only harder to find.
+{
+  my $server = Test::InputServer->new(
+    {
+      resultType    => 'input_required',
+      inputRequests => { confirm => { method => 'elicitation/create', params => {} } },
+    },
+  );
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    client_capabilities => { elicitation => {} },
+  );
+  $loop->add($client);
+
+  my $f = $client->call_tool('confirm_me', {});
+  ok($f->failure, 'input requests with no handler set fail the call');
+  like($f->failure, qr/on_input_request/, 'the failure names what is missing');
+  like($f->failure, qr/confirm/, 'and which request went unanswered');
+  is(scalar @{ $server->requests }, 1, 'nothing is retried');
+}
+
+# Declaring a capability is a promise both ways: the server may only ask for
+# what was declared, and a client that quietly answered anyway would be
+# rewarding a server for breaking it.
+{
+  my $server = Test::InputServer->new(
+    {
+      resultType    => 'input_required',
+      inputRequests => { pick => { method => 'sampling/createMessage', params => {} } },
+    },
+  );
+
+  my $asked  = 0;
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    client_capabilities => { elicitation => {} },
+    on_input_request    => sub { $asked++; return { action => 'accept' } },
+  );
+  $loop->add($client);
+
+  my $f = $client->call_tool('sample_me', {});
+  ok($f->failure, 'an input request for an undeclared capability fails the call');
+  like($f->failure, qr/did not declare/,
+    'and is named as the server violation it is');
+  like($f->failure, qr{sampling/createMessage}, 'naming what was asked for');
+  is($asked, 0, 'the handler is never troubled with it');
+}
+
+# An input_required result with neither half leaves nothing to answer and
+# nothing to send back, so a retry would repeat the first request exactly.
+{
+  my $server = Test::InputServer->new({ resultType => 'input_required' });
+  my $client = Net::Async::MCP->new(server => $server);
+  $loop->add($client);
+
+  my $f = $client->read_resource('file:///one');
+  ok($f->failure, 'an input_required result that asks for nothing fails the call');
+  like($f->failure, qr/neither inputRequests nor requestState/,
+    'saying what the server left out');
+  is(scalar @{ $server->requests }, 1,
+    'and no retry that could not have differed from the first attempt');
+}
+
+# What the handler returns goes on the wire as it is, so a handler that
+# returned nothing usable has to be caught here rather than by the server.
+{
+  my $server = Test::InputServer->new(
+    {
+      resultType    => 'input_required',
+      inputRequests => { confirm => { method => 'elicitation/create', params => {} } },
+    },
+  );
+  my $client = Net::Async::MCP->new(
+    server              => $server,
+    client_capabilities => { elicitation => {} },
+    on_input_request    => sub { return },
+  );
+  $loop->add($client);
+
+  my $f = $client->call_tool('confirm_me', {});
+  ok($f->failure, 'a handler that answers with nothing fails the call');
+  like($f->failure, qr/not a HashRef/, 'saying what was expected');
+  like($f->failure, qr/confirm/, 'and for which request');
 }
 
 done_testing;

@@ -7,7 +7,7 @@ use parent 'IO::Async::Notifier';
 
 use Future::AsyncAwait;
 use Carp qw( croak );
-use Scalar::Util qw( looks_like_number );
+use Scalar::Util qw( blessed looks_like_number );
 
 our $VERSION = '0.004';
 
@@ -95,15 +95,20 @@ carrying the client's protocol version, capabilities, and info in C<_meta>.
 my $DEFAULT_PROTOCOL_VERSION
   = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
 
+# The settings this client keeps to itself, whichever transport it ends up
+# with.
+my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
+  on_input_request );
+
 # The keys handed to the HTTP transport as they are. Kept apart from the rest
 # because they are passed on only when the caller actually gave them: the
 # transport's own default for stall_timeout has to survive a client that was
 # never asked about it.
-my @HTTP_KEYS = qw( headers timeout stall_timeout );
+my @HTTP_KEYS = qw( headers timeout stall_timeout on_notification );
 
 sub _init {
   my ( $self, $params ) = @_;
-  for my $key (qw( server command url protocol_version client_capabilities ), @HTTP_KEYS) {
+  for my $key (@CLIENT_KEYS, @HTTP_KEYS) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
   $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
@@ -114,7 +119,7 @@ sub _init {
 sub configure {
   my ( $self, %params ) = @_;
   my @http = grep { exists $params{$_} } @HTTP_KEYS;
-  for my $key (qw( server command url protocol_version client_capabilities ), @HTTP_KEYS) {
+  for my $key (@CLIENT_KEYS, @HTTP_KEYS) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
   $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
@@ -204,10 +209,11 @@ touches this attribute keeps sending.
 Setting this is a B<promise>, not a hint. A conforming server may not send an
 C<inputRequest> for a capability the client did not declare, so the empty
 default is precisely what keeps a server from asking this client for anything
-it cannot do. Declaring C<sampling> or C<elicitation> here tells the server it
-may ask - and this client has no way to answer either of them yet, so such a
-request would go unanswered and the server would be left waiting. Declare a
-capability only once there is something on your side that serves it.
+it cannot do. Declaring C<sampling>, C<elicitation> or C<roots> here tells the
+server it may ask, and what answers it is L</on_input_request> that gives, so
+declare a capability only once that handler serves it. This client holds both
+ends of the promise: an input request for a capability that is not declared
+here is refused as a server violation rather than passed on to the handler.
 
 =cut
 
@@ -260,6 +266,134 @@ applies. HTTP transport only.
 
 =cut
 
+=attr on_notification
+
+    my $mcp = Net::Async::MCP->new(
+        url             => 'https://example.com/mcp',
+        on_notification => sub {
+            my ( $mcp, $notification ) = @_;
+            warn "$notification->{method}\n";
+        },
+    );
+
+Invoked for every server-initiated notification that arrives while a request is
+running, with the decoded JSON-RPC notification as it stood on the wire -
+C<method> and, where the notification has any, C<params>. The
+C<notifications/progress> of a long C<tools/call> is the usual reason to want
+one, and it is only worth anything while that call is still running, which is
+why it is an event and not part of the L<Future> the call resolves with.
+
+Handed straight to the transport, so it can be set through C<new> or
+C<configure> like any other of them; configuring it on a client that is already
+in a loop reaches the transport it built. Note that the first argument is then
+that transport rather than this client, since it is the transport that invokes
+the event.
+
+Only the HTTP transport delivers notifications today. The Stdio transport still
+drops the ones its server sends, and the InProcess transport has no way to
+carry any at all, so setting this on either is silently without effect.
+
+=cut
+
+=attr on_input_request
+
+    my $mcp = Net::Async::MCP->new(
+        server              => $server,
+        client_capabilities => { elicitation => {} },
+        on_input_request    => sub {
+            my ( $mcp, $method, $params ) = @_;
+            # $method is 'elicitation/create', 'sampling/createMessage', ...
+            return { action => 'accept', content => { ok => \1 } };
+        },
+    );
+
+Invoked for every input request a server embeds in a result, and returns the
+response to it - either the response structure itself, or a L<Future> that will
+resolve with one, which is what lets a handler go and ask a human. The
+C<$params> are the request's own, whatever the asked-for method takes: a
+C<message> and C<requestedSchema> for C<elicitation/create>, the messages for
+C<sampling/createMessage>, and so on.
+
+One handler serves every kind of input request rather than one attribute per
+capability, because the set of methods a server may ask for is the
+specification's to grow, and a caller branching on C<$method> keeps working
+when it does.
+
+Set it through C<new> or C<configure>, or implement a method of this name in a
+subclass - it is an ordinary L<IO::Async::Notifier> event, so both work.
+Handlers are called one after another, in the order of the request keys, so a
+handler that asks a user two questions asks them one at a time.
+
+Its return value goes on the wire as it is, under the key the server gave the
+request, and must be a HashRef; C<< { action => 'accept', content => {...} } >>
+is what a server expects for an C<elicitation/create>. See
+L</Input required results> for the round trip this handler is one half of.
+
+=cut
+
+=head2 Input required results
+
+A server that needs something from the client before it can finish answers with
+an C<input_required> result instead of a final one - C<resultType> set to
+C<input_required>, optionally C<inputRequests> naming what it wants, and
+optionally an opaque C<requestState>. SEP-2322 made this the way sampling,
+elicitation and roots reach a client: not as requests the server sends, but as
+a result the client answers by asking the same question again.
+
+Every method of this client walks that round trip itself and returns the final
+result, so a caller never sees an C<input_required>:
+
+=over 4
+
+=item *
+
+C<inputRequests> are handed one by one to L</on_input_request>, and its answers
+travel back as C<inputResponses> under the very keys the server used.
+
+=item *
+
+C<requestState> is mirrored back untouched. It is sealed and bound by the
+server, so this client never parses, inspects or edits it, and a result that
+carries none is retried without one.
+
+=item *
+
+A result with a C<requestState> and no C<inputRequests> is a server asking for
+nothing but the call again, and is retried straight away without troubling the
+handler.
+
+=back
+
+Four things fail the L<Future> instead, loudly, because each of them would
+otherwise leave the caller with a result that looks final and is not:
+
+=over 4
+
+=item *
+
+An C<inputRequests> entry for a capability that L</client_capabilities> does
+not declare. A conforming server may not ask for one, so this is named as the
+server violation it is rather than passed to the handler.
+
+=item *
+
+An C<inputRequests> with no L</on_input_request> to answer it.
+
+=item *
+
+More than eight C<input_required> results in a row on one request. A server may
+legitimately ask twice, but one that never arrives at a result has to be given
+up on somewhere.
+
+=item *
+
+An C<input_required> result carrying neither of the two, which leaves nothing
+to answer and nothing to send back.
+
+=back
+
+=cut
+
 # Private: the C<_meta> fields carried on every JSON-RPC request, as required
 # by the current MCP revision.
 sub _meta {
@@ -281,6 +415,113 @@ sub _with_meta {
   my %params = %{ $params // {} };
   my %meta   = (%{ $self->_meta }, %{ $params{_meta} // {} });
   return { %params, _meta => \%meta };
+}
+
+# Private: how many input_required results one request may collect before the
+# client gives up on it. A server is allowed to ask again after being answered
+# - a confirmation can lead to a second question - but one that never arrives
+# at a final result would keep this going for as long as it feels like.
+my $MAX_INPUT_ROUNDS = 8;
+
+# Private: one MCP request, from a method's own params to the final result.
+# Every method goes through here, because this is the one place that holds what
+# is true of all of them: the _meta every request carries, and the
+# input_required round trips a result may take before it is one.
+async sub _request {
+  my ( $self, $method, $params, %options ) = @_;
+
+  my ( %retry, $rounds );
+  while ( 1 ) {
+    my $result = await $self->{transport}->send_request($method,
+      $self->_with_meta({ %{ $params // {} }, %retry }), %options);
+
+    return $result
+      unless ref $result eq 'HASH'
+      && ( $result->{resultType} // '' ) eq 'input_required';
+
+    croak "MCP $method: server answered with input_required more than "
+      . "$MAX_INPUT_ROUNDS times without returning a result"
+      if ++$rounds > $MAX_INPUT_ROUNDS;
+
+    %retry = await $self->_input_required($method, $result);
+  }
+}
+
+# Private: the top-level params that turn a request into the retry an
+# input_required result asks for. Both of them are optional and each is sent
+# only when the result actually carried it.
+async sub _input_required {
+  my ( $self, $method, $result ) = @_;
+
+  my %retry;
+
+  # Mirrored back exactly as it arrived. The server sealed it against its own
+  # secret and bound it to this caller and this primitive, so there is nothing
+  # here to read and everything to break by touching it.
+  $retry{requestState} = $result->{requestState} if defined $result->{requestState};
+
+  my $requests = $result->{inputRequests};
+  if ( ref $requests eq 'HASH' && keys %$requests ) {
+    $retry{inputResponses} = await $self->_input_responses($method, $requests);
+  }
+  elsif ( !%retry ) {
+    # Neither half: no question to answer, and nothing to hand back that would
+    # make the second attempt any different from the first.
+    croak "MCP $method: server sent an input_required result with neither "
+      . "inputRequests nor requestState";
+  }
+
+  return %retry;
+}
+
+# Private: the answers to a server's input requests, under the keys it asked
+# them by - the same keys it reads its own responses back from.
+async sub _input_responses {
+  my ( $self, $method, $requests ) = @_;
+
+  # Checked over the whole ask before a single answer is gathered: a server
+  # that asks for an undeclared capability has broken its side of the
+  # capability promise, and no part of that ask should be acted on.
+  my $capabilities = $self->{client_capabilities} // {};
+  for my $key (sort keys %$requests) {
+    my $request = $requests->{$key};
+    my $wanted  = ref $request eq 'HASH' ? $request->{method} : undef;
+
+    croak "MCP $method: server sent an input request '$key' without a method"
+      unless defined $wanted && length $wanted;
+
+    # The capability is the namespace of the method asked for:
+    # elicitation/create needs elicitation, sampling/createMessage needs
+    # sampling, roots/list needs roots.
+    my $capability = ( split m{/}, $wanted, 2 )[0];
+    croak "MCP $method: server sent input request '$key' for '$wanted', "
+      . "a capability this client did not declare in client_capabilities"
+      unless exists $capabilities->{$capability};
+  }
+
+  croak "MCP $method: server sent input requests ("
+    . join(', ', sort keys %$requests)
+    . ") but no on_input_request handler is set to answer them"
+    unless $self->can_event('on_input_request');
+
+  my %responses;
+  for my $key (sort keys %$requests) {
+    my $request  = $requests->{$key};
+    my $response = $self->invoke_event(on_input_request =>
+      $request->{method}, $request->{params} // {});
+
+    # A handler that has to ask a human answers with a Future instead of an
+    # answer, and the retry waits for it.
+    $response = await $response if blessed($response) && $response->isa('Future');
+
+    croak "MCP $method: on_input_request answered input request '$key' with "
+      . "something that is not a HashRef"
+      unless ref $response eq 'HASH';
+
+    $responses{$key} = $response;
+  }
+
+  return \%responses;
 }
 
 sub server_info { $_[0]->{server_info} }
@@ -310,8 +551,7 @@ async sub initialize {
   my ( $self ) = @_;
   $self->_ensure_transport;
 
-  my $result = await $self->{transport}->send_request('server/discover',
-    $self->_with_meta);
+  my $result = await $self->_request('server/discover');
 
   # Read without autovivifying an _meta key into the result we hand back.
   my $meta = $result->{_meta} // {};
@@ -366,8 +606,8 @@ async sub _list_all {
   my ( @entries, %seen, $cursor );
 
   for my $page ( 1 .. $MAX_LIST_PAGES ) {
-    my $result = await $self->{transport}->send_request($method,
-      $self->_with_meta(defined $cursor ? { cursor => $cursor } : undef));
+    my $result = await $self->_request($method,
+      defined $cursor ? { cursor => $cursor } : undef);
 
     push @entries, @{ $result->{$key} // [] };
 
@@ -533,11 +773,11 @@ async sub call_tool {
 
   my @header_params = await $self->_tool_header_params($name, $arguments);
 
-  my $result = await $self->{transport}->send_request('tools/call',
-    $self->_with_meta({
+  my $result = await $self->_request('tools/call',
+    {
       name      => $name,
       arguments => $arguments,
-    }),
+    },
     @header_params ? ( header_params => \@header_params ) : (),
   );
   return $result;
@@ -583,11 +823,10 @@ L</list_tools>.
 
 async sub get_prompt {
   my ( $self, $name, $arguments ) = @_;
-  my $result = await $self->{transport}->send_request('prompts/get',
-    $self->_with_meta({
-      name      => $name,
-      arguments => $arguments // {},
-    }));
+  my $result = await $self->_request('prompts/get', {
+    name      => $name,
+    arguments => $arguments // {},
+  });
   return $result;
 }
 
@@ -617,10 +856,9 @@ L</list_tools>.
 
 async sub read_resource {
   my ( $self, $uri ) = @_;
-  my $result = await $self->{transport}->send_request('resources/read',
-    $self->_with_meta({
-      uri => $uri,
-    }));
+  my $result = await $self->_request('resources/read', {
+    uri => $uri,
+  });
   return $result;
 }
 
@@ -635,10 +873,9 @@ hashref.
 
 async sub subscriptions_listen {
   my ( $self, $notifications ) = @_;
-  my $result = await $self->{transport}->send_request('subscriptions/listen',
-    $self->_with_meta({
-      notifications => $notifications // {},
-    }));
+  my $result = await $self->_request('subscriptions/listen', {
+    notifications => $notifications // {},
+  });
   return $result;
 }
 
