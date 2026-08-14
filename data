@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-14T22:37:37Z
+created: 2026-08-14T20:43:05Z
+id: 9
+priority: medium
+started: 2026-08-14T22:26:40Z
+status: done
+tags:
+- protocol
+title: 'Pagination: nextCursor in allen list-Methoden'
+updated: 2026-08-14T22:37:37Z
+---
+
+list_tools, list_prompts und list_resources ignorieren einen nextCursor im Ergebnis - es wird also nur die erste Seite gesehen. Bei list_tools betrifft das zusaetzlich den Schema-Cache fuer die Mcp-Param-Header. Dokumentiert ist die Luecke bisher nur im POD von list_tools. Der installierte Perl-Server paginiert nicht, andere Implementierungen duerfen.
