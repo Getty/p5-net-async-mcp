@@ -8,7 +8,15 @@ use Scalar::Util qw( weaken );
 use Net::Async::MCP;
 use MCP::Server;
 use MCP::Server::Transport::HTTP;
-use MCP::Constants qw(PROTOCOL_VERSION);
+
+# The revision this client speaks, spelled out rather than read from
+# MCP::Constants: what this client sends, and what it can be renegotiated into,
+# is decided by the request shapes it builds, and taking the installed server
+# library's word for it here would let these tests pass for a reason that has
+# nothing to do with the client. It is the one entry of
+# @SPOKEN_PROTOCOL_VERSIONS in Net::Async::MCP, and if that list ever names a
+# different revision this is the second place to change.
+my $spoken = '2026-07-28';
 
 # Create test MCP server with tools
 my $server = MCP::Server->new(name => 'TestServer');
@@ -43,8 +51,44 @@ my $loop = IO::Async::Loop->new;
 my $mcp = Net::Async::MCP->new(server => $server);
 $loop->add($mcp);
 
-# The client speaks the current protocol revision by default
-is($mcp->protocol_version, PROTOCOL_VERSION, 'defaults to current protocol version');
+# The client speaks the newest revision it builds requests for by default
+is($mcp->protocol_version, $spoken, 'defaults to the revision this client speaks');
+
+# ...and which revision that is, this distribution says. The assertion above
+# cannot tell that from a client reading MCP::Constants, since the installed
+# MCP names the same revision today; only an MCP::Constants naming a different
+# one can, and it has to be in @INC before Net::Async::MCP is loaded - hence a
+# child perl. Following that constant is the bug being guarded against: the
+# moment MCP learns a newer revision, a client still building this one's
+# requests would put the new version string on them.
+{
+  require File::Temp;
+  my $fake = File::Temp->newdir;
+  mkdir "$fake/MCP" or die "mkdir $fake/MCP: $!";
+  open my $out, '>', "$fake/MCP/Constants.pm" or die "$fake/MCP/Constants.pm: $!";
+  print $out <<'CONSTANTS';
+package MCP::Constants;
+use strict;
+use warnings;
+use constant PROTOCOL_VERSION             => '2027-01-01';
+use constant UNSUPPORTED_PROTOCOL_VERSION => -32022;
+1;
+CONSTANTS
+  close $out or die "$fake/MCP/Constants.pm: $!";
+
+  # The fake ahead of everything else, so it is the MCP::Constants the child
+  # finds, and the rest of this process's @INC behind it so the child finds
+  # Net::Async::MCP where this test did.
+  my @inc = map {; "-I$_" } "$fake", grep { !ref } @INC;
+  open my $child, '-|', $^X, @inc, '-e',
+    'use Net::Async::MCP; print Net::Async::MCP->new->protocol_version'
+    or die "cannot run $^X: $!";
+  my $reported = do { local $/; <$child> };
+  close $child;
+
+  is($reported, $spoken,
+    'the default stays the spoken revision even where MCP::Constants names another');
+}
 
 # And declares nothing it cannot serve: an empty declaration is what keeps a
 # conforming server from sending inputRequests this client could not answer.
@@ -55,7 +99,7 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
 # protocolVersion in _meta, and MCP::Server answers a missing one with -32602.
 {
   $mcp->configure(protocol_version => undef);
-  is($mcp->protocol_version, PROTOCOL_VERSION,
+  is($mcp->protocol_version, $spoken,
     'undef protocol_version falls back to the default');
 
   my $f = $mcp->list_tools;
@@ -719,15 +763,6 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   like($f->failure, qr/confirm/, 'and for which request');
 }
 
-# The revision this client speaks, spelled out rather than read from
-# MCP::Constants: what the client can be renegotiated into is decided by the
-# request shapes it builds, and taking the server library's word for it here
-# would let these tests pass for a reason that has nothing to do with the
-# client. It is the one entry of @SPOKEN_PROTOCOL_VERSIONS in Net::Async::MCP,
-# and if that list ever names a different revision this is the second place to
-# change.
-my $spoken = '2026-07-28';
-
 # A server that does not speak the revision a request was made with answers
 # UNSUPPORTED_PROTOCOL_VERSION (-32022) and names the ones it does speak in
 # error.data.supported. MCP::Server never refuses a version its own
@@ -919,6 +954,26 @@ my $spoken = '2026-07-28';
     'and the answer that was already given');
   is($last->{requestState}, 'STATE-1', 'with the state that answer belongs to');
   is($asked, 1, 'so the handler is not troubled a second time for the same question');
+}
+
+# The InProcess transport is not an IO::Async::Notifier at all: it has no
+# configure and no events, and a direct call and its return value leave nothing
+# a notification could arrive over. So an on_notification on an in-process
+# client stays without effect - which is only true for as long as the client
+# asks what its transport takes before handing anything over, rather than
+# handing on whatever the caller set.
+{
+  my $client = Net::Async::MCP->new(server => $server, on_notification => sub { });
+  $loop->add($client);
+
+  ok(lives { $client->configure(on_notification => sub { }) },
+    'an on_notification configured on an in-process client reaches no transport')
+    or note $@;
+
+  ok(!$client->{transport}->can('configure'),
+    'there being no configure on that transport to reach in the first place');
+  is($client->call_tool('echo', { message => 'still here' })->get->{content}[0]{text},
+    'Echo: still here', 'and the client goes on working');
 }
 
 # What a client does with an on_notification of its own can only be seen on a

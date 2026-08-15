@@ -86,23 +86,15 @@ both JSON and SSE responses. See L<Net::Async::MCP::Transport::HTTP>.
 
 All methods return L<Future> objects and work with L<Future::AsyncAwait>.
 Call L</initialize> first before using any other MCP methods. It performs the
-handshake with a single C<server/discover> request of the current revision (the
-legacy C<initialize> request no longer exists in the current MCP revision),
-carrying the client's protocol version, capabilities, and info in C<_meta>.
+handshake with a single C<server/discover> request of the revision this client
+speaks (see L</protocol_version>; the legacy C<initialize> request no longer
+exists in it), carrying the client's protocol version, capabilities, and info
+in C<_meta>.
 
 =cut
 
-my $DEFAULT_PROTOCOL_VERSION
-  = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
-
-# The code a server answers a request made in a revision it does not speak
-# with. From L<MCP::Constants> where it is installed - it is only recommended,
-# not required - and otherwise the number the specification gives it.
-my $UNSUPPORTED_PROTOCOL_VERSION
-  = eval { require MCP::Constants; MCP::Constants::UNSUPPORTED_PROTOCOL_VERSION() }
-  // -32022;
-
-# The protocol revisions this client speaks, newest first, and the only ones a
+# The protocol revisions this client speaks, newest first: the first of them is
+# what a client that was not told otherwise sends, and they are the only ones a
 # refused request may be renegotiated into.
 #
 # What belongs in here is decided by the code below and by nothing else: an
@@ -120,20 +112,48 @@ my $UNSUPPORTED_PROTOCOL_VERSION
 # only happens to be the same one today.
 my @SPOKEN_PROTOCOL_VERSIONS = ('2026-07-28');
 
+# What this client sends when the caller named no protocol_version: the newest
+# revision it speaks. Deliberately not MCP::Constants::PROTOCOL_VERSION - that
+# is the revision the installed server library implements, and following it
+# onto a newer one would put that version string on requests this file still
+# builds in the old one, for the reason spelled out above.
+my $DEFAULT_PROTOCOL_VERSION = $SPOKEN_PROTOCOL_VERSIONS[0];
+
+# The code a server answers a request made in a revision it does not speak
+# with. The number the specification gives it, written out rather than read
+# from L<MCP::Constants>: it is compared against what a remote server sent, so
+# a locally installed library has no say in it, and a client on stdio or HTTP
+# has no reason to have L<MCP> installed at all.
+my $UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
 # The settings this client keeps to itself, whichever transport it ends up
 # with.
 my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
   on_input_request );
 
-# The keys handed to the HTTP transport as they are. Kept apart from the rest
-# because they are passed on only when the caller actually gave them: the
-# transport's own default for stall_timeout has to survive a client that was
-# never asked about it.
-my @HTTP_KEYS = qw( headers timeout stall_timeout on_notification );
+# The settings handed on to the transport instead, each with the class a
+# transport has to be for it to reach it. Kept apart from @CLIENT_KEYS because
+# they are passed on only when the caller actually gave them: the transport's
+# own default for stall_timeout has to survive a client that was never asked
+# about it.
+#
+# Which transport takes what is one decision per key rather than one for the
+# lot. headers, timeout and stall_timeout describe an HTTP request, and handing
+# one to the Stdio transport is not a setting it ignores but an "Unrecognised
+# configuration keys" croak; on_notification is an event both wire transports
+# have. The InProcess transport is no L<IO::Async::Notifier>, has no
+# C<configure> and no events at all, so it matches nothing here and is handed
+# nothing.
+my %TRANSPORT_KEYS = (
+  headers         => 'Net::Async::MCP::Transport::HTTP',
+  timeout         => 'Net::Async::MCP::Transport::HTTP',
+  stall_timeout   => 'Net::Async::MCP::Transport::HTTP',
+  on_notification => 'IO::Async::Notifier',
+);
 
 sub _init {
   my ( $self, $params ) = @_;
-  for my $key (@CLIENT_KEYS, @HTTP_KEYS) {
+  for my $key (@CLIENT_KEYS, keys %TRANSPORT_KEYS) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
   $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
@@ -143,8 +163,8 @@ sub _init {
 
 sub configure {
   my ( $self, %params ) = @_;
-  my @http = grep { exists $params{$_} } @HTTP_KEYS;
-  for my $key (@CLIENT_KEYS, @HTTP_KEYS) {
+  my @changed = grep { exists $params{$_} } sort keys %TRANSPORT_KEYS;
+  for my $key (@CLIENT_KEYS, keys %TRANSPORT_KEYS) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
   $self->{protocol_version}    //= $DEFAULT_PROTOCOL_VERSION;
@@ -152,11 +172,13 @@ sub configure {
 
   # A transport that already exists takes the change too: the transport is
   # built when this client joins a loop, and a bearer token that has to be
-  # rotated arrives long after that.
-  $self->{transport}->configure($self->_transport_params(@http))
-    if @http
-    && $self->{transport}
-    && $self->{transport}->isa('Net::Async::MCP::Transport::HTTP');
+  # rotated, or a handler for the notifications of a call about to be made,
+  # arrives long after that. Only the keys that transport takes, though - see
+  # %TRANSPORT_KEYS for why that is asked per key and not once for the lot.
+  if ( my $transport = $self->{transport} ) {
+    my @keys = grep { $transport->isa($TRANSPORT_KEYS{$_}) } @changed;
+    $transport->configure($self->_transport_params(@keys)) if @keys;
+  }
 
   $self->SUPER::configure(%params);
 }
@@ -215,33 +237,40 @@ sub _ensure_transport {
     croak "Stdio transport requires being added to an IO::Async::Loop"
       unless $self->loop;
     require Net::Async::MCP::Transport::Stdio;
-    my $transport = Net::Async::MCP::Transport::Stdio->new(
-      command => $self->{command},
-    );
-    $self->{transport} = $transport;
-    $self->add_child($transport);
+    $self->_build_transport('Net::Async::MCP::Transport::Stdio',
+      command => $self->{command});
   }
   elsif ($self->{url}) {
     croak "HTTP transport requires being added to an IO::Async::Loop"
       unless $self->loop;
     require Net::Async::MCP::Transport::HTTP;
-    my $transport = Net::Async::MCP::Transport::HTTP->new(
-      url => $self->{url},
-      # Only the keys the caller actually gave: handing over a stall_timeout of
-      # undef for one that was never set would switch off the transport's
-      # default instead of leaving it alone. on_notification is asked for by
-      # event rather than by key, because a subclass method of that name is a
-      # handler just as much as a configured code ref is.
-      $self->_transport_params(grep {
-        $_ eq 'on_notification' ? $self->can_event($_) : exists $self->{$_}
-      } @HTTP_KEYS),
-    );
-    $self->{transport} = $transport;
-    $self->add_child($transport);
+    $self->_build_transport('Net::Async::MCP::Transport::HTTP',
+      url => $self->{url});
   }
   else {
     croak "Must provide server, command, or url";
   }
+}
+
+# Private: a transport of $class, built with the setting that selected it and
+# whichever of %TRANSPORT_KEYS that class takes, and made a child of this
+# client so that it joins and leaves the loop along with it.
+sub _build_transport {
+  my ( $self, $class, %params ) = @_;
+
+  # Only the keys the caller actually gave: handing over a stall_timeout of
+  # undef for one that was never set would switch off the transport's default
+  # instead of leaving it alone. on_notification is asked for by event rather
+  # than by key, because a subclass method of that name is a handler just as
+  # much as a configured code ref is.
+  my @keys = grep { $class->isa($TRANSPORT_KEYS{$_}) }
+    grep { $_ eq 'on_notification' ? $self->can_event($_) : exists $self->{$_} }
+    sort keys %TRANSPORT_KEYS;
+
+  my $transport = $class->new(%params, $self->_transport_params(@keys));
+  $self->{transport} = $transport;
+  $self->add_child($transport);
+  return $transport;
 }
 
 sub protocol_version { $_[0]->{protocol_version} }
@@ -252,16 +281,22 @@ sub protocol_version { $_[0]->{protocol_version} }
 
 Returns (or via C<configure>/constructor argument C<protocol_version> sets) the
 MCP protocol revision this client speaks on the wire, such as C<'2026-07-28'>.
-Defaults to the L<MCP::Constants> C<PROTOCOL_VERSION> of the installed
-L<MCP::Server>. Sent on every request inside C<_meta>.
+Sent on every request inside C<_meta>. Defaults to the newest revision this
+client builds the requests of.
 
 A server that does not speak this revision answers with
 C<UNSUPPORTED_PROTOCOL_VERSION> (-32022) and names the ones it does. Where one
 of those is a revision this client speaks too - one whose request shapes it
 builds, which today is exactly one - the request goes out again in it, and this
 attribute keeps it, so every following request carries the agreed revision from
-the start. Which revisions those are is this client's own to say; what an
-installed L<MCP::Server> accepts has no part in it.
+the start.
+
+Which revisions those are, and which of them is the default, is this
+distribution's own to say. An installed L<MCP::Server> has no part in it:
+its C<PROTOCOL_VERSION> is the revision that library implements, and taking
+that for the default would put a new version string on requests still built in
+the old revision the moment the library learns a newer one - trading a clear
+"unsupported protocol version" for a confusing "method not found".
 
 Nothing beyond that one retry: a refusal that offers no usable revision, and a
 second refusal after the switch, both reach the caller as the server's own
@@ -352,8 +387,8 @@ applies. HTTP transport only.
         },
     );
 
-Invoked for every server-initiated notification that arrives while a request is
-running, with the decoded JSON-RPC notification as it stood on the wire -
+Invoked for every server-initiated notification the transport reads, with the
+decoded JSON-RPC notification as it stood on the wire -
 C<method> and, where the notification has any, C<params>. The
 C<notifications/progress> of a long C<tools/call> is the usual reason to want
 one, and it is only worth anything while that call is still running, which is
@@ -367,11 +402,17 @@ it is the transport that receives the notification and starts the call.
 
 A handler set directly on a transport object rather than here is that
 transport's own event and is called with the transport - see
-L<Net::Async::MCP::Transport::HTTP/on_notification>.
+L<Net::Async::MCP::Transport::HTTP/on_notification> and
+L<Net::Async::MCP::Transport::Stdio/on_notification>.
 
-Only the HTTP transport delivers notifications today. The Stdio transport still
-drops the ones its server sends, and the InProcess transport has no way to
-carry any at all, so setting this on either is silently without effect.
+The HTTP and Stdio transports both deliver what their server sends, and a
+handler set here reaches whichever of the two this client built. What reaches
+them differs: the HTTP transport reads notifications off the response stream of
+a request it is running, while the Stdio transport reads whatever the
+subprocess writes, whether a request is in flight or not. The InProcess
+transport has nothing a notification could arrive over - it is a direct call
+and its return value - so setting this on an in-process client is silently
+without effect.
 
 =cut
 

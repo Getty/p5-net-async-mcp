@@ -10,6 +10,20 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Fixed on_notification never reaching a Stdio client. The stdio transport
+    delivers notifications, but the client built that transport without passing
+    anything to it and forwarded a later configure only to an HTTP one, so the
+    attribute did nothing for anyone not using HTTP. Which options reach which
+    transport is now one table keyed by the class each option needs, so the
+    HTTP-only ones still cannot reach a transport that would croak on them, and
+    the InProcess transport - not a notifier at all - is excluded without
+    being named
+  - The default protocol version is now the revision this client builds
+    requests for, spelled out here, instead of whatever the installed
+    MCP::Constants names. Those were the same thing by coincidence; had MCP
+    moved ahead, the client would have quietly put a newer version on requests
+    shaped for the older one. lib/Net/Async/MCP.pm now loads no part of MCP at
+    all, which suits a stdio or HTTP client, where MCP is only a recommendation
   - Renegotiation now picks from the revisions this client actually builds
     requests for, rather than from the installed MCP::Server's list of what it
     accepts. Those are different questions with a coincidentally identical

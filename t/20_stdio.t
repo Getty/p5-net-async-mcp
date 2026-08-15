@@ -268,6 +268,108 @@ $loop->add($mcp);
   $loop->remove($transport);
 }
 
+# The same notification, but arriving where a caller of this distribution
+# actually waits for it: on the client, through an on_notification given to
+# Net::Async::MCP rather than to the transport. Nothing of the delivery is
+# retested here - the block above owns that - only that a handler set on the
+# client reaches the transport this client built at all, and that it is called
+# with the client, which is the promise every event of this client makes and
+# must not depend on which transport is underneath.
+{
+  my @notifying = (
+    $^X, '-MJSON::MaybeXS', '-e', q{
+      my $json = JSON::MaybeXS->new(utf8 => 1);
+      $| = 1;
+      while (defined(my $line = <STDIN>)) {
+        chomp $line;
+        next if $line eq '';
+        my $message = $json->decode($line);
+        next unless defined $message->{id};
+        # Written before the response, so the request's own future arriving is
+        # proof the notification was read: nothing here sleeps or polls.
+        print $json->encode({
+          jsonrpc => '2.0',
+          method  => 'notifications/progress',
+          params  => { progressToken => 'tok', progress => $message->{id} },
+        }), "\n";
+        print $json->encode({
+          jsonrpc => '2.0',
+          id      => $message->{id},
+          result  => { content => [ { type => 'text', text => 'done' } ] },
+        }), "\n";
+      }
+    },
+  );
+
+  my @seen;
+  my $client = Net::Async::MCP->new(
+    command         => [@notifying],
+    on_notification => sub { push @seen, [@_] },
+  );
+  $loop->add($client);
+
+  my $result = $client->call_tool('slow', {})->get;
+  is($result->{content}[0]{text}, 'done', 'the call the notification belongs to returns');
+
+  is(scalar @seen, 1, 'the notification written before that result reached the client');
+  is($seen[0][0], exact_ref($client),
+    'with the client as first argument, not the transport that read the line');
+  is($seen[0][1]{method}, 'notifications/progress',
+    'and the notification as it stood on the wire');
+
+  # Set on a client that is already in a loop, and so long after the transport
+  # was built: a caller that wants the progress of one long call sets a handler
+  # right before making it.
+  my @later;
+  $client->configure(on_notification => sub { push @later, [@_] });
+  $client->call_tool('slow', {})->get;
+
+  is(scalar @later, 1, 'a handler configured on a running client gets the next one');
+  is($later[0][0], exact_ref($client), 'with the client in front of it as well');
+  is(scalar @seen, 1, 'and the handler it replaced receives no more');
+
+  # What must not travel with it. The Stdio transport croaks on a configuration
+  # key it does not know, so a client handing its whole transport-bound set
+  # down would die here rather than quietly keep a header for a transport that
+  # sends none.
+  ok(lives { $client->configure(headers => { Authorization => 'Bearer t' }) },
+    'an HTTP-only key configured on a stdio client does not reach the transport')
+    or note $@;
+  is($client->headers, { Authorization => 'Bearer t' },
+    'the client keeps it all the same, for a transport that would take it');
+  ok(!exists $client->{transport}{headers}, 'and the transport was never handed it');
+
+  $client->shutdown->get;
+  $loop->remove($client);
+}
+
+# Retention on that path. The handler the client hands down is held by the
+# transport, and the client holds the transport, so what reaches the transport
+# must not hold the client: a strong reference there closes a cycle no refcount
+# breaks, and the client - with the subprocess's file handles under it - would
+# outlive every reference to it. Same question as the HTTP one in
+# t/10_inprocess.t, asked on the path that now carries a handler too.
+{
+  my $client = Net::Async::MCP->new(
+    command         => [ $^X, '-e', 'while (<STDIN>) {}' ],
+    on_notification => sub { },
+  );
+  $loop->add($client);
+
+  # Deliberately kept: the transport outliving this scope is what makes the
+  # question sharp, since it is the transport that holds the handler.
+  my $transport = $client->{transport};
+
+  $client->shutdown->get;
+
+  weaken( my $weak_client = $client );
+  $loop->remove($client);
+  undef $client;
+
+  is($weak_client, undef,
+    'a stdio client with an on_notification is freed once the loop lets go of it');
+}
+
 # A close and a request still running when the transport leaves the loop. The
 # process is a child of the transport and goes out with it, which unwatches
 # the child, so _on_finish never fires: the close future would wait for an
