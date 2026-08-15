@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T15:43:17Z
+created: 2026-08-15T00:52:24Z
+id: 26
+priority: low
+started: 2026-08-15T15:27:08Z
+status: done
+tags:
+- stdio
+title: subscriptions/listen ueber stdio ungeprueft
+updated: 2026-08-15T15:43:17Z
+---
+
+Der Stdio-Transport ignoriert resolve_on_notification. Ob subscriptions/listen ueber stdio ueberhaupt erreichbar ist, wurde bei #14 nicht untersucht - MCP::Server::to_stdio hat vermutlich gar keinen notification-faehigen Transport, dann antwortet der Server mit METHOD_NOT_FOUND und alles ist korrekt. Nachsehen und entweder dokumentieren oder nachziehen.
