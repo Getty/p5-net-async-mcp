@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T16:02:24Z
+created: 2026-08-14T23:16:43Z
+id: 22
+priority: low
+started: 2026-08-15T15:55:49Z
+status: done
+tags:
+- tests
+title: t/10_inprocess.t ist faktisch die Client-Testdatei
+updated: 2026-08-15T16:02:24Z
+---
+
+Rund 960 Zeilen, und Pagination, Header-Params, input_required, Renegotiation und on_notification sind alle transportunabhaengig - die on_notification-Bloecke benutzen sogar den HTTP-Transport. Der Dateiname sagt InProcess-Transport, der Inhalt ist der Client. Ein t/15_client.t waere der richtige Ort. Reine Umsortierung, kein Verhalten.
