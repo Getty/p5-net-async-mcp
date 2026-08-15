@@ -1,0 +1,16 @@
+---
+class: standard
+completed: 2026-08-15T15:55:35Z
+created: 2026-08-15T00:52:18Z
+id: 25
+priority: medium
+started: 2026-08-15T15:43:29Z
+status: done
+tags:
+- http
+- api
+title: Kein Signal, wenn ein Subscription-Stream von selbst endet
+updated: 2026-08-15T15:55:35Z
+---
+
+Das Future eines Abos ist bei der Acknowledgement aufgeloest, es gibt danach also nichts mehr, das scheitern koennte. Endet der Stream (Serverneustart, Gateway-Timeout), erfaehrt der Aufrufer es nur, indem er subscriptions_stop aufruft und false zurueckbekommt. Ein on_subscription_end-Event waere die Loesung - neue oeffentliche API auf Transport und Client plus %TRANSPORT_KEYS-Verdrahtung, deshalb bewusst nicht im Rahmen von #14 mitgemacht. Aktuell im POD als Luecke dokumentiert.
