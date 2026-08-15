@@ -10,6 +10,12 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Renegotiation now picks from the revisions this client actually builds
+    requests for, rather than from the installed MCP::Server's list of what it
+    accepts. Those are different questions with a coincidentally identical
+    answer today: let MCP ship a revision its server accepts and this client
+    does not shape requests for, and the old reading would have renegotiated
+    straight into it - a bug that would first appear on a dependency upgrade
   - Fixed the Stdio transport dropping every notification its server sends,
     the same gap the HTTP transport had before it read SSE incrementally, and
     delivered them to on_notification instead. Fixing the triage exposed a

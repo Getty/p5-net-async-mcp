@@ -96,17 +96,29 @@ my $DEFAULT_PROTOCOL_VERSION
   = eval { require MCP::Constants; MCP::Constants::PROTOCOL_VERSION() } // '2026-07-28';
 
 # The code a server answers a request made in a revision it does not speak
-# with, and the revisions this client could switch to instead. Both come from
-# L<MCP::Constants> where it is installed - it is only recommended, not
-# required - and fall back to the one revision this client is known to speak.
+# with. From L<MCP::Constants> where it is installed - it is only recommended,
+# not required - and otherwise the number the specification gives it.
 my $UNSUPPORTED_PROTOCOL_VERSION
   = eval { require MCP::Constants; MCP::Constants::UNSUPPORTED_PROTOCOL_VERSION() }
   // -32022;
 
-my @SUPPORTED_PROTOCOL_VERSIONS = do {
-  my $versions = eval { require MCP::Constants; MCP::Constants::SUPPORTED_VERSIONS() };
-  ref $versions eq 'ARRAY' && @$versions ? @$versions : ($DEFAULT_PROTOCOL_VERSION);
-};
+# The protocol revisions this client speaks, newest first, and the only ones a
+# refused request may be renegotiated into.
+#
+# What belongs in here is decided by the code below and by nothing else: an
+# entry means that what this file builds is what that revision defines - today
+# a server/discover handshake with no initialize/initialized pair, the
+# io.modelcontextprotocol/* keys in _meta, and input_required results answered
+# with inputResponses. So adding one means first teaching this client to build
+# that revision's request shapes. A revision some dependency happens to know
+# about is not one this client can speak, and switching to it on that strength
+# would put a new version string on requests that revision never had - trading
+# a clear "unsupported protocol version" for a confusing "method not found".
+#
+# Deliberately not MCP::Constants::SUPPORTED_VERSIONS: that list says what the
+# installed server library accepts, which is a different question whose answer
+# only happens to be the same one today.
+my @SPOKEN_PROTOCOL_VERSIONS = ('2026-07-28');
 
 # The settings this client keeps to itself, whichever transport it ends up
 # with.
@@ -245,9 +257,11 @@ L<MCP::Server>. Sent on every request inside C<_meta>.
 
 A server that does not speak this revision answers with
 C<UNSUPPORTED_PROTOCOL_VERSION> (-32022) and names the ones it does. Where one
-of those is a revision this client speaks too - the C<SUPPORTED_VERSIONS> of
-L<MCP::Constants> - the request goes out again in it, and this attribute keeps
-it, so every following request carries the agreed revision from the start.
+of those is a revision this client speaks too - one whose request shapes it
+builds, which today is exactly one - the request goes out again in it, and this
+attribute keeps it, so every following request carries the agreed revision from
+the start. Which revisions those are is this client's own to say; what an
+installed L<MCP::Server> accepts has no part in it.
 
 Nothing beyond that one retry: a refusal that offers no usable revision, and a
 second refusal after the switch, both reach the caller as the server's own
@@ -504,7 +518,7 @@ sub _renegotiated_version {
   my $supported = ref $error->{data} eq 'HASH' ? $error->{data}{supported} : undef;
   return undef unless ref $supported eq 'ARRAY';
 
-  my %usable = map { $_ => 1 } @SUPPORTED_PROTOCOL_VERSIONS;
+  my %usable = map { $_ => 1 } @SPOKEN_PROTOCOL_VERSIONS;
   for my $version (@$supported) {
     next unless defined $version && !ref $version && $usable{$version};
 

@@ -719,6 +719,15 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   like($f->failure, qr/confirm/, 'and for which request');
 }
 
+# The revision this client speaks, spelled out rather than read from
+# MCP::Constants: what the client can be renegotiated into is decided by the
+# request shapes it builds, and taking the server library's word for it here
+# would let these tests pass for a reason that has nothing to do with the
+# client. It is the one entry of @SPOKEN_PROTOCOL_VERSIONS in Net::Async::MCP,
+# and if that list ever names a different revision this is the second place to
+# change.
+my $spoken = '2026-07-28';
+
 # A server that does not speak the revision a request was made with answers
 # UNSUPPORTED_PROTOCOL_VERSION (-32022) and names the ones it does speak in
 # error.data.supported. MCP::Server never refuses a version its own
@@ -763,8 +772,8 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
 # again with it rather than handed back to the caller as a failure.
 {
   my $server = Test::VersionServer->new(
-    accepts   => { PROTOCOL_VERSION() => 1 },
-    supported => [ PROTOCOL_VERSION ],
+    accepts   => { $spoken => 1 },
+    supported => [ $spoken ],
   );
   my $client = Net::Async::MCP->new(
     server           => $server,
@@ -773,7 +782,7 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   $loop->add($client);
 
   my $result = $client->call_tool('echo', { message => 'hi' })->get;
-  is($result->{content}[0]{text}, 'spoke ' . PROTOCOL_VERSION,
+  is($result->{content}[0]{text}, "spoke $spoken",
     'a refused protocol version is renegotiated and the caller sees the result');
 
   my @calls = @{ $server->requests };
@@ -782,19 +791,19 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   my $key = 'io.modelcontextprotocol/protocolVersion';
   is($calls[0]{params}{_meta}{$key}, '2024-11-05',
     'the first attempt carried the version the client was configured with');
-  is($calls[1]{params}{_meta}{$key}, PROTOCOL_VERSION,
+  is($calls[1]{params}{_meta}{$key}, $spoken,
     'and the retry the one just agreed on, not the refused one again');
   is($calls[1]{params}{arguments}, { message => 'hi' },
     'otherwise repeating the original request');
 
-  is($client->protocol_version, PROTOCOL_VERSION,
+  is($client->protocol_version, $spoken,
     'the agreed version is kept on the client');
 
   # Kept, not rediscovered: a version renegotiated per request would pay for
   # the refusal again on every single one of them.
   $client->read_resource('file:///one')->get;
   is(scalar @{ $server->requests }, 3, 'so a later request is not renegotiated again');
-  is($server->requests->[2]{params}{_meta}{$key}, PROTOCOL_VERSION,
+  is($server->requests->[2]{params}{_meta}{$key}, $spoken,
     'it goes out with the agreed version straight away');
 }
 
@@ -805,7 +814,7 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
 {
   my $server = Test::VersionServer->new(
     accepts   => {},
-    supported => [ PROTOCOL_VERSION ],
+    supported => [ $spoken ],
   );
   my $client = Net::Async::MCP->new(
     server           => $server,
@@ -823,7 +832,10 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
 # None of the offered revisions is one this client speaks, so there is nothing
 # to retry with. What the caller gets then has to be the server's own error,
 # because everything it could act on - the code, and the versions it would
-# accept - is in there and in nothing this client could write instead.
+# accept - is in there and in nothing this client could write instead. A
+# revision only some dependency knows about ends up here too: the list a
+# refusal is answered from is the client's own, not the installed server
+# library's.
 {
   my $server = Test::VersionServer->new(
     accepts   => {},
@@ -885,7 +897,7 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
 }
 
 {
-  my $server = Test::MixedServer->new(supported => [ PROTOCOL_VERSION ]);
+  my $server = Test::MixedServer->new(supported => [ $spoken ]);
   my $asked  = 0;
   my $client = Net::Async::MCP->new(
     server              => $server,
@@ -901,7 +913,7 @@ is($mcp->client_capabilities, {}, 'declares no client capabilities by default');
   is(scalar @{ $server->requests }, 3, 'in three attempts, one for each');
 
   my $last = $server->requests->[2]{params};
-  is($last->{_meta}{'io.modelcontextprotocol/protocolVersion'}, PROTOCOL_VERSION,
+  is($last->{_meta}{'io.modelcontextprotocol/protocolVersion'}, $spoken,
     'the renegotiated attempt carries the version just agreed on');
   is($last->{inputResponses}{confirm}, { action => 'accept' },
     'and the answer that was already given');
