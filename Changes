@@ -1,4 +1,4 @@
-{{$NEXT}}
+0.004     2026-08-15 16:13:38Z
   - Added an on_subscription_end event, so a caller is told when a
     subscription's stream ends on its own - the server closing it, the
     connection failing underneath it - instead of having to ask
