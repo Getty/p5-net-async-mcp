@@ -10,6 +10,21 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Fixed subscriptions_listen being unusable over HTTP, which it was by
+    construction: a subscription stream never carries a JSON-RPC response, so
+    the request waited for something that could not arrive and died on the
+    stall timeout. A server acknowledges by notification instead, and the
+    client now tells the transport which notification settles the request. It
+    resolves with the acknowledgement's own parameters - the subscription id
+    and the notification kinds the server honoured - while the stream stays
+    open and feeds on_notification. The new subscriptions_stop ends one by
+    closing its stream, which is what unsubscribing is on this binding, and
+    shutdown ends any that are left
+  - Fixed every HTTP request waiting for its stream to close rather than for
+    its answer. A server that holds the stream open after responding kept the
+    caller waiting until the stall timeout; the response now settles the
+    request the moment it lands. This is the same decoupling subscriptions
+    needed, so both are one change
   - Fixed on_notification never reaching a Stdio client. The stdio transport
     delivers notifications, but the client built that transport without passing
     anything to it and forwarded a later configure only to an HTTP one, so the

@@ -1048,17 +1048,23 @@ hashref.
 
 =cut
 
+# Private: the notification a server answers a subscriptions/listen with in
+# place of a response. Named to the transport rather than recognised by it -
+# see subscriptions_listen.
+my $SUBSCRIPTION_ACKNOWLEDGED = 'notifications/subscriptions/acknowledged';
+
 async sub subscriptions_listen {
   my ( $self, $notifications ) = @_;
-  my $result = await $self->_request('subscriptions/listen', {
-    notifications => $notifications // {},
-  });
+  my $result = await $self->_request('subscriptions/listen',
+    { notifications => $notifications // {} },
+    resolve_on_notification => $SUBSCRIPTION_ACKNOWLEDGED);
   return $result;
 }
 
 =method subscriptions_listen
 
     my $subscription = await $mcp->subscriptions_listen({ toolsListChanged => 1 });
+    my $id = $subscription->{_meta}{'io.modelcontextprotocol/subscriptionId'};
 
 Opens a C<subscriptions/listen> subscription on the MCP server, requesting
 server-initiated notifications. C<$notifications> is a hashref mapping
@@ -1066,10 +1072,64 @@ notification types to a truthy value (e.g. C<toolsListChanged>,
 C<promptsListChanged>, C<resourcesListChanged>). The request carries the
 standard C<_meta> like all client methods.
 
-Returns the server's C<subscriptions/listen> result. Whether a server supports
-this method (and its notifications) is transport-dependent; a server without
-notification support responds with JSON-RPC error -32601 (C<METHOD_NOT_FOUND>),
-which this method surfaces as a failed L<Future>.
+A server does not answer this request with a response. It opens a stream,
+writes C<notifications/subscriptions/acknowledged> onto it, and then holds the
+stream open to carry the notifications that were subscribed to. This method
+returns that acknowledgement's C<params>: the subscription id under C<_meta>,
+and under C<notifications> the types the server actually honoured, which need
+not be everything that was asked for. The notifications themselves arrive at
+L</on_notification>, like every other server-initiated notification, and the
+acknowledgement does not - it is this request's answer rather than something
+that happened while it waited.
+
+Which notification answers the request is told to the transport rather than
+recognised by it, so that a transport executes what the protocol layer decided
+instead of reading method names and deciding for itself.
+
+Ending a subscription is L</subscriptions_stop>. There is no request for it:
+closing the stream is what unsubscribes, and a server drops the subscription
+when its stream finishes.
+
+Only L<Net::Async::MCP::Transport::HTTP> has a stream to run this on. The
+InProcess transport refuses C<subscriptions/listen> outright, and a server
+without notification support answers JSON-RPC error -32601
+(C<METHOD_NOT_FOUND>); either way the returned L<Future> fails.
+
+=cut
+
+async sub subscriptions_stop {
+  my ( $self, $subscription_id ) = @_;
+  $self->_ensure_transport;
+
+  my $transport = $self->{transport};
+  return 0 unless $transport->can('stop_subscription');
+  return $transport->stop_subscription($subscription_id);
+}
+
+=method subscriptions_stop
+
+    my $stopped = await $mcp->subscriptions_stop($subscription_id);
+
+Ends the subscription of that id, and resolves with true if there was one to
+end. The C<$subscription_id> is the one L</subscriptions_listen> handed back
+in C<< $subscription->{_meta}{'io.modelcontextprotocol/subscriptionId'} >>.
+
+Unsubscribing is closing the stream the subscription runs on. The current
+revision has no request that cancels a subscription and no acknowledgement of
+one, so nothing goes on the wire and the server drops the subscription when
+its stream finishes.
+
+Resolves with false for an id no subscription is running under - one that was
+never opened, one already stopped, and one whose stream has ended on its own,
+which are not told apart. It is also false on a transport that cannot
+subscribe at all, since neither the InProcess nor the Stdio transport has a
+stream a subscription could run on.
+
+That makes this the only way to ask whether a subscription is still running: a
+stream ending by itself reaches no caller. The L<Future> of
+L</subscriptions_listen> was settled by the acknowledgement long before and
+cannot report it, and there is no event for it either. See
+L<Net::Async::MCP::Transport::HTTP/stop_subscription>.
 
 =cut
 
@@ -1115,8 +1175,11 @@ async sub shutdown {
     await $mcp->shutdown;
 
 Cleanly shuts down the MCP connection. For the Stdio transport this sends
-SIGTERM to the subprocess and waits for it to exit. For the InProcess and HTTP
-transports this is a no-op: neither holds anything that outlives a request.
+SIGTERM to the subprocess and waits for it to exit. For the HTTP transport it
+ends every subscription still running, that being the one thing it holds which
+outlives the request that opened it, and sends nothing. For the InProcess
+transport it is a no-op: a direct call and its return value leave nothing
+behind.
 
 =cut
 

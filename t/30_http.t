@@ -836,6 +836,77 @@ sub streaming_transport {
     'a redirect that never reached the body reader is reported as the failure it is');
 }
 
+# What answers a request is its response, and the end of the body it arrived in
+# is a different moment: nothing in the Streamable HTTP binding obliges a
+# server to close the stream behind it, and a caller kept waiting for that
+# waits until the stall timeout gives up on a stream that has nothing left to
+# say. The mocks above feed a body and end it in the same call, which cannot
+# tell the two moments apart, so this one keeps the stream open.
+{
+  package Test::OpenStreamHTTP;
+
+  sub new { return bless { streams => [] }, shift }
+
+  sub do_request {
+    my ( $self, %args ) = @_;
+
+    my $stream = {
+      chunk => $args{on_header}->(HTTP::Response->new(200, 'OK',
+        [ 'Content-Type' => 'text/event-stream' ], '')),
+      future => Future->new,
+    };
+    push @{ $self->{streams} }, $stream;
+
+    return $stream->{future};
+  }
+
+  sub stream { return $_[0]{streams}[-1] }
+  sub feed   { $_[0]->stream->{chunk}->($_[1]); return $_[0] }
+  sub finish {
+    my ( $self ) = @_;
+    my $stream = $self->stream;
+    $stream->{future}->done($stream->{chunk}->()) unless $stream->{future}->is_ready;
+    return $self;
+  }
+}
+
+{
+  my @got;
+  my $t = Net::Async::MCP::Transport::HTTP->new(
+    url             => 'http://mcp.invalid/mcp',
+    on_notification => sub { push @got, $_[1] },
+  );
+  my $http = Test::OpenStreamHTTP->new;
+  $t->{http} = $http;
+
+  my $f = $t->send_request('tools/call', { name => 'slow' });
+
+  $http->feed(sse_event($PROGRESS));
+  ok(!$f->is_ready, 'the notifications before a response do not answer the request');
+
+  $http->feed(sse_event($RESULT));
+  ok($f->is_done, 'while its response answers it the moment it lands')
+    or diag $f->failure;
+  is($f->get->{content}[0]{text}, 'done', 'with the result the response carried');
+
+  ok(!$http->stream->{future}->is_ready,
+    'and a server that holds the stream open afterwards holds nobody up');
+
+  $http->feed(sse_event($MESSAGE));
+  is([ map { $_->{method} } @got ],
+    [ 'notifications/progress', 'notifications/message' ],
+    'what it still sends is delivered as the notification it is');
+
+  $http->finish;
+  ok($f->is_done, 'and the end of the stream changes nothing about the answer');
+  is($f->get->{content}[0]{text}, 'done', 'which is still the one it gave');
+
+  # The caller holds the answer rather than the exchange now, so the transport
+  # is what holds the exchange - and what has to let go of it again, or every
+  # request ever made stays on it.
+  is($t->{pending}, {}, 'and the finished request is off the transport');
+}
+
 # Net::Async::HTTP applies no timeout unless it is given one, so a server that
 # accepts a POST and then goes quiet holds the caller forever. Only the stall
 # timeout has a default: it fires when nothing at all arrives any more, where a
