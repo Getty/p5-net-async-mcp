@@ -1,0 +1,19 @@
+---
+class: standard
+completed: 2026-08-15T00:30:47Z
+created: 2026-08-14T23:14:16Z
+depends_on:
+- 18
+- 19
+id: 20
+priority: high
+started: 2026-08-15T00:18:31Z
+status: done
+tags:
+- api
+- stdio
+title: on_notification erreicht den Stdio-Transport nicht
+updated: 2026-08-15T00:30:47Z
+---
+
+Zwei Stellen in lib/Net/Async/MCP.pm: _ensure_transport baut den Stdio-Zweig flach als Stdio->new(command => ...), nur der url-Zweig geht ueber _transport_params; und configure reicht Aenderungen nur weiter, wenn der Transport ein HTTP-Transport ist (isa-Guard). Ein Rename von @HTTP_KEYS reicht nicht: headers/timeout/stall_timeout sind HTTP-only und Stdio croakt darauf, on_notification geht an beide. Der isa-Guard muss also zu einem Filter pro Key werden, und der Stdio-Zweig braucht dieselbe Behandlung wie der HTTP-Zweig - inklusive des Wrappers, der den Client statt des Transports als ersten Handler-Parameter uebergibt.
