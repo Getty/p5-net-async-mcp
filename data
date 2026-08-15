@@ -1,0 +1,18 @@
+---
+class: standard
+completed: 2026-08-15T00:52:13Z
+created: 2026-08-14T22:26:24Z
+depends_on:
+- 5
+id: 14
+priority: high
+started: 2026-08-15T00:31:05Z
+status: done
+tags:
+- http
+- protocol
+title: subscriptions_listen ueber HTTP nutzbar machen
+updated: 2026-08-15T00:52:13Z
+---
+
+Auf einem subscriptions/listen-Stream sendet der Server nie eine JSON-RPC-Response: MCP::Server::Transport::HTTP::_handle_subscription oeffnet den SSE-Stream und schreibt als erstes MCP::Server::Subscription::acknowledgement - eine Notification (notifications/subscriptions/acknowledged) mit der subscriptionId in _meta und den honorierten notifications in params. Danach bleibt der Stream offen. Unser Future wartet auf eine Response, die nie kommt. Braucht: Future loest auf der Acknowledgement auf und liefert deren params, Stream bleibt offen und speist on_notification, plus ein Weg zum Beenden (Stream schliessen ist laut Spec das Abmelden). Baut auf #5 auf.
