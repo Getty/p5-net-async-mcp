@@ -120,6 +120,8 @@ sub configure {
   $self->{headers} = delete $params{headers} if exists $params{headers};
   $self->{on_notification} = delete $params{on_notification}
     if exists $params{on_notification};
+  $self->{on_subscription_end} = delete $params{on_subscription_end}
+    if exists $params{on_subscription_end};
   for my $key (qw( timeout stall_timeout )) {
     next unless exists $params{$key};
     $self->{$key} = delete $params{$key};
@@ -298,15 +300,25 @@ sub send_request {
 
     if ( my $self = $weak_self ) {
       my $ended = delete $self->{pending}{$id};
-      delete $self->{subscriptions}{ $ended->{subscription} }
-        if $ended && defined $ended->{subscription};
+
+      # Whether the subscription is still registered tells who ended it:
+      # stop_subscription and close take the entry out before they close the
+      # stream, so an end that came from the server's side - a stream the
+      # server closed, a connection that failed - reaches here with the entry
+      # standing, and that is the end on_subscription_end reports. An end this
+      # client caused itself has nobody waiting to be told.
+      if ($ended && defined $ended->{subscription}
+        && delete $self->{subscriptions}{ $ended->{subscription} }) {
+        $self->maybe_invoke_event(on_subscription_end => $ended->{subscription});
+      }
     }
 
     # An exchange that ends after the caller was answered has nothing left to
     # tell it. This is every subscription: it was settled by its
     # acknowledgement, and the stream ending afterwards - closed by
-    # L</stop_subscription>, by the server, or by the connection failing -
-    # reaches no one, which L</stop_subscription> documents as the gap it is.
+    # L</stop_subscription>, by the server, or by the connection failing - is
+    # reported through L</on_subscription_end> above rather than through this
+    # Future, which was settled long before.
     return if $outcome->is_ready;
 
     # Otherwise the exchange is where the answer comes from: an HTTP error, a
@@ -469,8 +481,11 @@ carries it, not that nothing else can.
 
 =back
 
-What is B<not> reported is a subscription ending on its own - see
-L</stop_subscription>.
+What is not reported is the B<reason> a subscription ended. The stream can
+end in more than one way - the server closing it, the connection failing
+underneath it - and they all end the subscription with them, reported alike
+through L</on_subscription_end>. L</stop_subscription> is the one end this
+transport causes itself, and that one is not reported at all.
 
 =cut
 
@@ -581,11 +596,12 @@ resolves with:
 Returns false for an id this transport is not running a subscription under,
 which is the same answer an id that already ended gets: a subscription is
 forgotten as soon as its stream is over, however it ended. That makes this the
-only way to ask whether one is still running, because a stream ending on its
-own - the server closing it, the connection failing - reaches no caller. The
-request's L<Future> was settled by the acknowledgement long before and cannot
-report it, and there is no event for it either. A caller that has to notice
-promptly has nothing here to notice it with.
+way to ask whether one is still running. The prompt way is
+L</on_subscription_end>, which fires the moment a stream ends on its own - the
+server closing it, the connection failing - because the request's L<Future>
+was settled by the acknowledgement long before and cannot report it. A stop
+this transport caused itself, through this method or L</close>, is not an end
+on_subscription_end reports.
 
 =cut
 
@@ -638,6 +654,39 @@ Set through C<new> or C<configure> like any L<IO::Async::Notifier> event, or
 by a subclass implementing a method of this name. Notifications are dropped
 while nothing handles them: a server sends them whether or not this client
 asked, and there is nothing sensible to do with one no caller wants.
+
+=attr on_subscription_end
+
+    my $transport = Net::Async::MCP::Transport::HTTP->new(
+        url                  => 'https://example.com/mcp',
+        on_subscription_end  => sub {
+            my ( $transport, $subscription_id ) = @_;
+        },
+    );
+
+Invoked when a subscription's stream ends on its own, with the subscription id
+as its second argument - the same id the acknowledgement handed back and
+L</stop_subscription> takes. That is the one handle a caller has on a running
+subscription, so it is also the one thing worth telling it that ended.
+
+A subscription is answered by its acknowledgement, and the L<Future> of the
+request that opened it is settled there and then; the stream then runs for as
+long as the subscription does. So the only way a subscription can come to the
+caller's attention again is its end - and there are two kinds. An end this
+transport causes itself, through L</stop_subscription> or L</close>, happens
+because the caller asked for it and is not reported. An end that comes from
+the server's side - the server closing the stream, the connection failing
+underneath it, a gateway giving up on it - reaches a caller holding nothing
+but an already-settled L<Future>, and that is the end this event reports, the
+moment the stream ends. The two are told apart by whether the subscription was
+still registered when its stream ended; L</stop_subscription> and L</close>
+deregister before they close, so only an end that came from outside arrives
+with it standing.
+
+Set through C<new> or C<configure> like any L<IO::Async::Notifier> event, or
+by a subclass implementing a method of this name. This is the only transport
+that can fire it: it is the only one with a stream a subscription runs on -
+the InProcess and Stdio transports cannot carry a subscription at all.
 
 =cut
 

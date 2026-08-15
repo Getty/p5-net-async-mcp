@@ -141,15 +141,23 @@ my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
 # lot. headers, timeout and stall_timeout describe an HTTP request, and handing
 # one to the Stdio transport is not a setting it ignores but an "Unrecognised
 # configuration keys" croak; on_notification is an event both wire transports
-# have. The InProcess transport is no L<IO::Async::Notifier>, has no
-# C<configure> and no events at all, so it matches nothing here and is handed
-# nothing.
+# have. on_subscription_end has only the HTTP transport to go to, a stream
+# being the one thing a subscription can end on. The InProcess transport is no
+# L<IO::Async::Notifier>, has no C<configure> and no events at all, so it
+# matches nothing here and is handed nothing.
 my %TRANSPORT_KEYS = (
-  headers         => 'Net::Async::MCP::Transport::HTTP',
-  timeout         => 'Net::Async::MCP::Transport::HTTP',
-  stall_timeout   => 'Net::Async::MCP::Transport::HTTP',
-  on_notification => 'IO::Async::Notifier',
+  headers               => 'Net::Async::MCP::Transport::HTTP',
+  timeout               => 'Net::Async::MCP::Transport::HTTP',
+  stall_timeout         => 'Net::Async::MCP::Transport::HTTP',
+  on_notification       => 'IO::Async::Notifier',
+  on_subscription_end   => 'Net::Async::MCP::Transport::HTTP',
 );
+
+# The keys of %TRANSPORT_KEYS that are events of this client rather than
+# settings. They travel to the transport wrapped - see _event_handler - and
+# are asked for by event rather than by key, because a subclass method of that
+# name is a handler just as much as a configured code ref is.
+my %EVENT_KEYS = map { $_ => 1 } qw( on_notification on_subscription_end );
 
 sub _init {
   my ( $self, $params ) = @_;
@@ -184,19 +192,21 @@ sub configure {
 }
 
 # Private: the named settings as the transport takes them. All of them travel
-# as they stand except on_notification, which the transport would otherwise
-# invoke with itself - see _notification_handler.
+# as they stand except the events among them, which the transport would
+# otherwise invoke with itself - see _event_handler.
 sub _transport_params {
   my ( $self, @keys ) = @_;
   my %params = map { $_ => $self->{$_} } @keys;
-  $params{on_notification} = $self->_notification_handler
-    if exists $params{on_notification};
+  for my $event (grep { $EVENT_KEYS{$_} } keys %params) {
+    $params{$event} = $self->_event_handler($event);
+  }
   return %params;
 }
 
-# Private: the on_notification handed to the transport. It is the transport
-# that receives a notification and invokes the event, so a handler passed on as
-# it stands would be called with the transport, while every other event of this
+# Private: the handler handed to the transport for an event of this client's
+# own. It is the transport that receives the underlying thing - a notification,
+# an ended subscription - and invokes the event, so a handler passed on as it
+# stands would be called with the transport, while every other event of this
 # client is called with the client. This wrapper puts the client back in front,
 # and leaves the choice of handler to the client's own event dispatch, so a
 # subclass method serves as well as a configured code ref.
@@ -205,15 +215,15 @@ sub _transport_params {
 # client: a strong reference in here would close the cycle. It is never undef
 # where it matters - a transport that can still deliver anything is in a loop,
 # and the loop holds the client that holds it.
-sub _notification_handler {
-  my ( $self ) = @_;
-  return undef unless $self->can_event('on_notification');
+sub _event_handler {
+  my ( $self, $event ) = @_;
+  return undef unless $self->can_event($event);
 
   weaken( my $weak_self = $self );
   return sub {
     my ( undef, @args ) = @_;
     my $client = $weak_self or return;
-    return $client->maybe_invoke_event(on_notification => @args);
+    return $client->maybe_invoke_event($event => @args);
   };
 }
 
@@ -260,11 +270,11 @@ sub _build_transport {
 
   # Only the keys the caller actually gave: handing over a stall_timeout of
   # undef for one that was never set would switch off the transport's default
-  # instead of leaving it alone. on_notification is asked for by event rather
-  # than by key, because a subclass method of that name is a handler just as
-  # much as a configured code ref is.
+  # instead of leaving it alone. Events are asked for by name rather than by
+  # key, because a subclass method of that name is a handler just as much as a
+  # configured code ref is.
   my @keys = grep { $class->isa($TRANSPORT_KEYS{$_}) }
-    grep { $_ eq 'on_notification' ? $self->can_event($_) : exists $self->{$_} }
+    grep { $EVENT_KEYS{$_} ? $self->can_event($_) : exists $self->{$_} }
     sort keys %TRANSPORT_KEYS;
 
   my $transport = $class->new(%params, $self->_transport_params(@keys));
@@ -412,6 +422,44 @@ a request it is running, while the Stdio transport reads whatever the
 subprocess writes, whether a request is in flight or not. The InProcess
 transport has nothing a notification could arrive over - it is a direct call
 and its return value - so setting this on an in-process client is silently
+without effect.
+
+=attr on_subscription_end
+
+    my $mcp = Net::Async::MCP->new(
+        url                  => 'https://example.com/mcp',
+        on_subscription_end  => sub {
+            my ( $mcp, $subscription_id ) = @_;
+        },
+    );
+
+Invoked when the stream a subscription runs on ends on its own, with the
+subscription id as its second argument - the same id L</subscriptions_listen>
+handed back and L</subscriptions_stop> takes. The first argument is this
+client, the same as L</on_notification> and every other event here gets, even
+though it is the transport that watches the stream and starts the call.
+
+A subscription is answered by its acknowledgement, and the L<Future> of
+L</subscriptions_listen> is settled there and then; the stream then runs for
+as long as the subscription does. So the only way a subscription can come to
+the caller's attention again is its end - and there are two kinds. An end the
+caller caused itself, through L</subscriptions_stop>, happens because it asked
+for it and is not reported. An end that comes from the server's side - the
+server closing the stream, the connection failing underneath it, a gateway
+giving up on it - reaches a caller holding nothing but an already-settled
+L<Future>, and that is the end this event reports, the moment the stream ends.
+A caller waiting on L</subscriptions_stop> for false, to learn the same thing,
+would learn it only when it thought to ask.
+
+Set it through C<new> or C<configure> like any other event, or implement a
+method of this name in a subclass; configuring it on a client that is already
+in a loop reaches the transport it built. A handler set directly on a
+transport object rather than here is that transport's own event and is called
+with the transport - see L<Net::Async::MCP::Transport::HTTP/on_subscription_end>.
+
+Only L<Net::Async::MCP::Transport::HTTP> can fire it: it is the only transport
+with a stream a subscription runs on, and L</subscriptions_listen> says as
+much. Setting this on a Stdio or InProcess client is therefore silently
 without effect.
 
 =cut
@@ -1093,7 +1141,12 @@ when its stream finishes.
 Only L<Net::Async::MCP::Transport::HTTP> has a stream to run this on. The
 InProcess transport refuses C<subscriptions/listen> outright, and a server
 without notification support answers JSON-RPC error -32601
-(C<METHOD_NOT_FOUND>); either way the returned L<Future> fails.
+(C<METHOD_NOT_FOUND>); either way the returned L<Future> fails. The Stdio
+transport refuses it as well: L<MCP::Server> E<gt>= 0.15 serves the method
+over stdio too, answering with a C<notifications/subscriptions/acknowledged>
+notification where HTTP would answer with a response, and a transport that
+cannot settle a request from a notification says so rather than wait for an
+answer that will not come.
 
 =cut
 
@@ -1125,10 +1178,12 @@ which are not told apart. It is also false on a transport that cannot
 subscribe at all, since neither the InProcess nor the Stdio transport has a
 stream a subscription could run on.
 
-That makes this the only way to ask whether a subscription is still running: a
-stream ending by itself reaches no caller. The L<Future> of
-L</subscriptions_listen> was settled by the acknowledgement long before and
-cannot report it, and there is no event for it either. See
+That makes this the way to ask whether a subscription is still running. The
+prompt way is L</on_subscription_end>, which fires the moment a stream ends on
+its own - the server closing it, the connection failing - because the
+L<Future> of L</subscriptions_listen> was settled by the acknowledgement long
+before and cannot report it. This method is what a caller that missed the
+event, or did not set one, falls back on. See
 L<Net::Async::MCP::Transport::HTTP/stop_subscription>.
 
 =cut

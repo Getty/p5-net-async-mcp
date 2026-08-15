@@ -149,11 +149,23 @@ sub _remove_from_loop {
 }
 
 sub send_request {
-  # %options: binding hints from the client, none of which apply on stdio
   my ( $self, $method, $params, %options ) = @_;
 
   if ($self->{closed}) {
     return Future->fail("MCP server process has exited");
+  }
+
+  # resolve_on_notification names the notification a server answers a request
+  # with in place of a response - how subscriptions/listen is answered. This
+  # transport cannot settle a request from a notification: the answer would
+  # arrive at on_notification like any other, leaving the request waiting for
+  # a response the server is not going to send. Refused on the spot rather
+  # than left to hang, and nothing is written: a request that went out anyway
+  # would open a subscription on the server that nothing here could stop.
+  if (defined $options{resolve_on_notification}) {
+    return Future->fail("MCP subscriptions/listen is not usable over the stdio "
+      . "transport: the transport cannot settle a request from a notification "
+      . "(resolve_on_notification)");
   }
 
   my $id = ++$self->{next_id};
@@ -248,9 +260,15 @@ MCP server is free to ignore the notification and finish the request anyway;
 cancelling only guarantees that this client stops caring about the answer.
 
 Accepts the same optional trailing name/value options as the other transports,
-C<header_params> among them, and ignores all of them: they describe how a
+C<header_params> among them, and ignores all but one: they describe how a
 request is mirrored into HTTP headers, of which a JSON-RPC line on stdin has
-none. See L<Net::Async::MCP::Transport::HTTP/send_request>.
+none. The exception is C<resolve_on_notification>, which names the
+notification a server answers a request with in place of a response - how a
+C<subscriptions/listen> is answered. This transport cannot settle a request
+from a notification: the answer would arrive at L</on_notification> like any
+other, leaving the request waiting for a response the server is not going to
+send. A request carrying that option therefore fails on the spot rather than
+hang. See L<Net::Async::MCP::Transport::HTTP/send_request>.
 
 =cut
 

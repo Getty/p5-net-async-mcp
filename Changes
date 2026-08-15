@@ -1,4 +1,22 @@
 {{$NEXT}}
+  - Added an on_subscription_end event, so a caller is told when a
+    subscription's stream ends on its own - the server closing it, the
+    connection failing underneath it - instead of having to ask
+    subscriptions_stop and get false back. The HTTP transport fires it with
+    the subscription id the moment the stream ends without this client having
+    ended it: subscriptions_stop and close deregister before they close, so an
+    end the caller caused itself is not reported. The client forwards the event
+    through %TRANSPORT_KEYS like on_notification, so a handler set there is
+    called with the client. Only the HTTP transport can fire it; the InProcess
+    and Stdio transports cannot carry a subscription
+  - Fixed subscriptions_listen hanging on a stdio client instead of failing.
+    MCP::Server >= 0.15 serves subscriptions/listen over stdio too, answering
+    it with a notifications/subscriptions/acknowledged notification rather
+    than a response, and the stdio transport ignored resolve_on_notification:
+    the acknowledgement arrived at on_notification while the request waited
+    forever for an answer that was not coming. The transport now refuses
+    resolve_on_notification on the spot, so subscriptions/listen over stdio
+    fails loudly with the reason instead of hanging
   - Added a client_capabilities option, so a caller can declare what the client
     supports instead of the hardcoded empty object every request used to carry.
     The default stays empty, which is what keeps a conforming server from

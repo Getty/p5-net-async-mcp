@@ -343,6 +343,95 @@ $loop->add($mcp);
   $loop->remove($client);
 }
 
+# A request a server answers with a notification has nothing to settle it.
+# MCP::Server >= 0.15 serves subscriptions/listen over stdio too, and answers
+# it with notifications/subscriptions/acknowledged - a notification, not a
+# response - so the acknowledgement reaches on_notification while the request
+# itself stays pending. The transport therefore refuses resolve_on_notification
+# outright rather than let subscriptions_listen hang: it has no way of
+# settling a request from a notification, and one that went out anyway would
+# open a subscription on the server that nothing here could ever stop.
+{
+  my @notes;
+  my $transport = Net::Async::MCP::Transport::Stdio->new(
+    command => [
+      $^X, '-MJSON::MaybeXS', '-e', q{
+        my $json = JSON::MaybeXS->new(utf8 => 1);
+        $| = 1;
+        while (defined(my $line = <STDIN>)) {
+          chomp $line;
+          next if $line eq '';
+          my $message = $json->decode($line);
+          next unless defined $message->{id};
+          if (($message->{method} // '') eq 'subscriptions/listen') {
+            print $json->encode({
+              jsonrpc => '2.0',
+              method  => 'notifications/subscriptions/acknowledged',
+              params  => {
+                _meta => { 'io.modelcontextprotocol/subscriptionId' => $message->{id} },
+                notifications => { toolsListChanged => \1 },
+              },
+            }), "\n";
+            next;
+          }
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            result  => {},
+          }), "\n";
+        }
+      },
+    ],
+    on_notification => sub {
+      my ( undef, $note ) = @_;
+      push @notes, $note;
+    },
+  );
+  $loop->add($transport);
+
+  my $subscription = $transport->send_request('subscriptions/listen',
+    { notifications => { toolsListChanged => 1 } });
+
+  # The server answers by notification, so the request has nothing to settle
+  # it. A follow-up round trip is what proves the acknowledgement was read:
+  # its response arrives behind it on the one channel, and nothing here
+  # sleeps or polls.
+  $transport->send_request('ping')->get;
+
+  ok(!$subscription->is_ready,
+    'a request the server answers with a notification has nothing to settle it');
+  is(scalar @notes, 1, 'the acknowledgement reached on_notification');
+  is($notes[0]{method}, 'notifications/subscriptions/acknowledged',
+    'as a notification, the way MCP::Server >= 0.15 answers over stdio');
+  is($notes[0]{params}{_meta}{'io.modelcontextprotocol/subscriptionId'}, 1,
+    'carrying the subscription id the server handed out');
+
+  # What a caller of subscriptions_listen actually does, which is how the
+  # transport is asked to settle a request from a notification. It cannot, so
+  # the request fails on the spot rather than hang like the one above.
+  my $refused = $transport->send_request('subscriptions/listen',
+    { notifications => { toolsListChanged => 1 } },
+    resolve_on_notification => 'notifications/subscriptions/acknowledged');
+
+  is($refused->failure,
+    'MCP subscriptions/listen is not usable over the stdio transport: the '
+    . 'transport cannot settle a request from a notification '
+    . '(resolve_on_notification)',
+    'resolve_on_notification is refused loudly instead of ignored');
+  is(scalar keys %{ $transport->{pending} }, 1,
+    'the refused request is not sent and leaves nothing pending behind');
+
+  # The one subscription request is still pending, with no response to come
+  # and the process about to go away - settled by the close, which is the one
+  # thing that can still settle it.
+  $transport->close->get;
+  ok($subscription->is_failed,
+    'closing settles the request the server never answered');
+  like($subscription->failure, qr/MCP server process exited/,
+    'with the reason the answer is not coming');
+  $loop->remove($transport);
+}
+
 # Retention on that path. The handler the client hands down is held by the
 # transport, and the client holds the transport, so what reaches the transport
 # must not hold the client: a strong reference there closes a cycle no refcount

@@ -104,14 +104,25 @@ sub list_changed {
     $stream->{future}->done($stream->{chunk}->()) unless $stream->{future}->is_ready;
     return $self;
   }
+
+  # The connection dying underneath the stream, which is what a server restart
+  # or a gateway giving up looks like from the transport: the exchange fails
+  # rather than ending cleanly.
+  sub fail {
+    my ( $self, $message, $which ) = @_;
+    my $stream = $self->stream($which);
+    $stream->{future}->fail($message) unless $stream->{future}->is_ready;
+    return $self;
+  }
 }
 
 sub transport {
-  my ( $notifications ) = @_;
+  my ( $notifications, $ends ) = @_;
 
   my $t = Net::Async::MCP::Transport::HTTP->new(
-    url             => 'http://mcp.invalid/mcp',
-    on_notification => sub { push @$notifications, $_[1] },
+    url                  => 'http://mcp.invalid/mcp',
+    on_notification      => sub { push @$notifications, $_[1] },
+    on_subscription_end  => sub { push @$ends, $_[1] if $ends },
   );
   $t->{http} = Test::LiveHTTP->new;
 
@@ -132,7 +143,8 @@ sub subscribe {
 # finishes.
 {
   my @got;
-  my ( $t, $http ) = transport(\@got);
+  my @ended;
+  my ( $t, $http ) = transport(\@got, \@ended);
 
   my $f = subscribe($t, toolsListChanged => \1);
 
@@ -164,6 +176,8 @@ sub subscribe {
     'stopping a running subscription reports that it stopped one');
   ok($http->stream->{future}->is_cancelled,
     'and closes the stream, which is what unsubscribing is over this binding');
+  is([ @ended ], [],
+    'while an end the caller caused itself is not reported as an on_subscription_end');
 
   ok(!$t->stop_subscription('sub-1'),
     'a subscription that has been stopped is no longer there to stop');
@@ -176,12 +190,13 @@ sub subscribe {
 }
 
 # A stream that ends while the subscription is running ends the subscription
-# with it, and nothing says so: the request's Future was settled by the
-# acknowledgement long ago and there is no event for it. Asking is all there
-# is, so asking has to answer honestly.
+# with it. The request's Future was settled by the acknowledgement long ago
+# and cannot report it, so on_subscription_end is what tells the caller - the
+# moment it happens, rather than when it next thinks to ask.
 {
   my @got;
-  my ( $t, $http ) = transport(\@got);
+  my @ended;
+  my ( $t, $http ) = transport(\@got, \@ended);
 
   my $f = subscribe($t, toolsListChanged => \1);
   $http->feed(acknowledgement('sub-1', 'toolsListChanged'));
@@ -190,9 +205,34 @@ sub subscribe {
   $http->finish;
 
   ok($f->is_done, 'the server ending the stream leaves the answer it gave standing');
+  is([ @ended ], ['sub-1'],
+    'and reports the subscription that ended on its own, with the id');
   ok(!$t->stop_subscription('sub-1'),
     'while the subscription it was carrying is gone, and says so when asked');
   is($t->{pending}, {}, 'with nothing left behind on the transport');
+}
+
+# The same end reached from the other direction: not a stream the server closed
+# cleanly but a connection that died underneath it - a server that restarted,
+# a gateway that gave up. Whatever ended the stream, the subscription on it is
+# over, and the caller is told in the same way.
+{
+  my @got;
+  my @ended;
+  my ( $t, $http ) = transport(\@got, \@ended);
+
+  my $f = subscribe($t, toolsListChanged => \1);
+  $http->feed(acknowledgement('sub-1', 'toolsListChanged'));
+  ok($f->is_done, 'a subscription is running') or diag $f->failure;
+
+  $http->fail('connection reset by peer');
+
+  ok($f->is_done, 'a failed connection leaves the answer it gave standing too');
+  is([ @ended ], ['sub-1'],
+    'and reports the same end through the same event');
+  ok(!$t->stop_subscription('sub-1'),
+    'with the subscription gone there as well');
+  is($t->{pending}, {}, 'and nothing left behind on the transport');
 }
 
 # Two at once. Each has its own request, its own stream and its own id, and
@@ -200,7 +240,8 @@ sub subscribe {
 # transport keys its streams by subscription id rather than holding one.
 {
   my @got;
-  my ( $t, $http ) = transport(\@got);
+  my @ended;
+  my ( $t, $http ) = transport(\@got, \@ended);
 
   my $tools = subscribe($t, toolsListChanged => \1);
   $http->feed(acknowledgement('sub-tools', 'toolsListChanged'), 0);
@@ -227,24 +268,31 @@ sub subscribe {
 
   # close has to take the rest with it: a subscription outlives the request
   # that opened it, so it is the one thing this transport holds that a
-  # shutdown has to end.
+  # shutdown has to end. A shutdown is a caller's own doing, so it is not
+  # reported as an end that happened on its own either.
   $t->close->get;
   ok($http->stream(1)->{future}->is_cancelled,
     'closing the transport closes the streams still open on it');
+  is([ @ended ], [],
+    'while a shutdown ending a subscription is not reported as one ending on its own');
 }
 
 # A stream that ends before the acknowledgement answered nothing. Reporting it
 # as the generic missing response would send a caller looking for a response
-# the server was never going to send.
+# the server was never going to send - and there is no subscription to report
+# the end of either: one that never got its acknowledgement was never running.
 {
   my @got;
-  my ( $t, $http ) = transport(\@got);
+  my @ended;
+  my ( $t, $http ) = transport(\@got, \@ended);
 
   my $f = subscribe($t, toolsListChanged => \1);
   $http->finish;
 
   is($f->failure, 'MCP HTTP stream ended before the subscription was acknowledged',
     'a stream that ended before acknowledging names what it failed to do');
+  is([ @ended ], [],
+    'and no on_subscription_end, there being no subscription yet');
 }
 
 # An acknowledgement without a subscription id is a subscription that cannot be
@@ -288,7 +336,7 @@ sub subscribe {
 # the transport to know - it deliberately does not read the method name and
 # decide for itself.
 sub client {
-  my ( $notifications ) = @_;
+  my ( $notifications, $ends ) = @_;
 
   my ( $t, $http ) = transport([]);
 
@@ -298,7 +346,8 @@ sub client {
   # Configured after the transport is in place, which is the path a caller
   # setting a handler on a live client takes, and the one that has to reach
   # the transport for a subscription's notifications to arrive at all.
-  $mcp->configure(on_notification => sub { push @$notifications, $_[1] });
+  $mcp->configure(on_notification => sub { push @$notifications, $_[1] if $notifications });
+  $mcp->configure(on_subscription_end => sub { push @$ends, [ @_ ] }) if $ends;
 
   return ( $mcp, $http );
 }
@@ -336,6 +385,43 @@ sub client {
   ok($http->stream->{future}->is_cancelled, 'by closing the stream it ran on');
   ok(!$mcp->subscriptions_stop($id)->get,
     'and a second stop finds nothing left to end');
+}
+
+# The whole point of on_subscription_end is that it reaches the caller - and on
+# the client level, where the caller actually holds the subscription: the
+# Future of subscriptions_listen was settled by the acknowledgement long ago,
+# so a stream ending on its own - a server restart, a gateway giving up - has
+# nothing else to report it through.
+{
+  my @ended;
+  my ( $mcp, $http ) = client(undef, \@ended);
+
+  my $f = $mcp->subscriptions_listen({ toolsListChanged => 1 });
+  $http->feed(acknowledgement('sub-1', 'toolsListChanged'));
+  ok($f->is_done, 'a subscription is running') or diag $f->failure;
+
+  $http->finish;
+
+  ok($f->is_done, 'the stream ending leaves the answer it gave standing');
+  is(scalar @ended, 1,
+    'and reaches the on_subscription_end handler of the client');
+  is($ended[0][0], exact_ref($mcp),
+    'with the client as its first argument, like every event of it');
+  is($ended[0][1], 'sub-1',
+    'and the subscription id that ended');
+  ok(!$mcp->subscriptions_stop('sub-1')->get,
+    'which is also what subscriptions_stop reports when asked');
+
+  # A stream that ends after the caller stopped the subscription is the caller
+  # getting what it asked for, not an end it needs to be told about.
+  my $again = $mcp->subscriptions_listen({ toolsListChanged => 1 });
+  $http->feed(acknowledgement('sub-2', 'toolsListChanged'), 1);
+  ok($again->is_done, 'a second subscription is running') or diag $again->failure;
+  ok($mcp->subscriptions_stop('sub-2')->get, 'stopped by the caller');
+  $http->finish(1);
+
+  is(scalar @ended, 1,
+    'and a stream closed by subscriptions_stop is not reported as ended on its own');
 }
 
 # The other two transports have no stream a subscription could run on, so they
