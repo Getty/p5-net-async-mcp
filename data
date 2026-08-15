@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T15:36:12Z
+created: 2026-08-14T23:16:49Z
+id: 23
+priority: medium
+started: 2026-08-15T15:27:02Z
+status: done
+tags:
+- tests
+title: Keine Cancellation-Abdeckung auf Client-Ebene
+updated: 2026-08-15T15:36:12Z
+---
+
+Der einzige Cancellation-Test cancelt das Transport-Future direkt (t/20_stdio.t). Seit #7 sitzt mit _request ein abgeleitetes Future zwischen Aufrufer und Transport (followed_by) - der Pfad, den ein echter Aufrufer nimmt, ist also ungetestet. Von Hand geprueft: cancelt man das Client-Future, wird der pending-Eintrag im Transport verworfen und on_cancel feuert. Gehoert als Test festgenagelt.
