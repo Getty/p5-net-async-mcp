@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T00:17:05Z
+created: 2026-08-14T22:43:09Z
+id: 18
+priority: high
+started: 2026-08-14T22:59:53Z
+status: done
+tags:
+- stdio
+title: Stdio verwirft Server-Notifications still
+updated: 2026-08-15T00:17:05Z
+---
+
+_on_stdout_read macht "next unless defined $id" - eine JSON-RPC-Notification vom Server (kein id) wird wortlos weggeworfen. Gleiche Luecke, die #5 fuer HTTP geschlossen hat: notifications/progress und notifications/message waehrend eines langen tools/call kommen nie an. Fix: kein id und ein method-Feld -> maybe_invoke_event(on_notification => ...), analog zum HTTP-Transport.
