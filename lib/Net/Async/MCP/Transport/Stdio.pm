@@ -35,6 +35,12 @@ request is represented by a L<Future> that resolves when the matching response
 arrives. If the subprocess exits unexpectedly, all pending futures are failed
 with an error message including the exit code.
 
+The subprocess speaks on its own as well as in answer: a line carrying no
+C<id> is a server-initiated notification - C<notifications/progress> and
+C<notifications/message> during a long running C<tools/call> above all - and
+is delivered to L</on_notification> the moment it is read, rather than waiting
+for a response it is not part of.
+
 This transport is selected automatically by L<Net::Async::MCP> when constructed
 with a C<command> argument.
 
@@ -57,6 +63,8 @@ sub configure {
   if (exists $params{command}) {
     $self->{command} = delete $params{command};
   }
+  $self->{on_notification} = delete $params{on_notification}
+    if exists $params{on_notification};
   $self->SUPER::configure(%params);
 }
 
@@ -104,6 +112,40 @@ sub _add_to_loop {
 
   $self->{process} = $process;
   $self->add_child($process);
+}
+
+sub _remove_from_loop {
+  my ( $self, $loop ) = @_;
+
+  # Leaving the loop takes the process along, it being a child of this
+  # transport, and with it the watches on the child's streams that _on_finish
+  # waits for. So _on_finish will not run again, and everything it would have
+  # settled has to be settled here instead, or it stays pending for the rest
+  # of the program: the requests still waiting for an answer, and a close
+  # still waiting for the exit.
+  #
+  # Both are failed rather than completed, because completing either would be
+  # a claim this transport cannot make. Nothing here saw a response go missing
+  # or a process die; what it knows is that neither can reach it any more. The
+  # two messages differ in what was lost so a caller holding both can tell
+  # them apart.
+  #
+  # Same shape as _on_finish, and for the same reasons: the keys are taken
+  # before the loop, so a handler that touches the pending table as its future
+  # fails cannot disturb the iteration, and every future is deleted as it is
+  # settled, so neither path can reach one the other already answered.
+  for my $id (keys %{$self->{pending}}) {
+    my $future = delete $self->{pending}{$id};
+    $future->fail("MCP server process left the loop before the request was answered")
+      if $future && !$future->is_ready;
+  }
+
+  if ($self->{close_future} && !$self->{close_future}->is_ready) {
+    ( delete $self->{close_future} )
+      ->fail("MCP server process left the loop before it exited");
+  }
+
+  $self->SUPER::_remove_from_loop($loop);
 }
 
 sub send_request {
@@ -154,6 +196,14 @@ the subprocess stdin. Returns a L<Future> that resolves to the C<result> value
 when the matching response is read from stdout, or fails with an error if the
 server returns a JSON-RPC error or the process exits.
 
+Everything the subprocess writes before that response is read as it arrives.
+A line carrying no C<id> is a notification the server sent of its own accord
+and is delivered to L</on_notification> the moment it lands, so the
+C<notifications/progress> and C<notifications/message> of a long running call
+reach a caller while the call is still running, rather than after it. A line
+with an C<id> but neither a C<result> nor an C<error> is a server-initiated
+request, which this client does not answer and drops.
+
 A JSON-RPC error fails the L<Future> with more than its message. L<Future>'s
 failure convention is C<< ( $message, $category, @details ) >>, so the failure
 reads C<< ( "MCP error $code: $message", 'mcp', $error ) >>: in scalar context
@@ -168,11 +218,20 @@ the raw JSON-RPC error object comes with it.
 
 The C<mcp> category marks a genuine JSON-RPC error from the server and nothing
 else. The failures this transport raises on its own - a request sent after the
-subprocess has exited, and a request still pending when it does - carry their
-message alone, so a caller that finds no category knows there is no server
-error object behind it.
+subprocess has exited, a request still pending when it does, and a request
+still pending when the transport leaves its loop - carry their message alone,
+so a caller that finds no category knows there is no server error object
+behind it.
 
 Fails immediately if the subprocess has already exited.
+
+Removing the transport from its L<IO::Async::Loop> while the request is still
+pending fails it with C<MCP server process left the loop before the request
+was answered>. The process leaves the loop with the transport that owns it, so
+no answer can reach this client any more, and a L<Future> that would wait for
+one forever is better ended with the reason it will not arrive. The message
+differs from the one a pending L</close> is failed with, so a caller holding
+both can tell which loss it is looking at.
 
 Cancelling the returned L<Future> cancels the request: the pending entry is
 dropped, so a response that still arrives for it is discarded, and a
@@ -249,6 +308,13 @@ Sends SIGTERM to the subprocess and returns a L<Future> that resolves when
 the process exits. If the process has already exited, returns an immediately
 resolved L<Future>.
 
+Removing the transport from its L<IO::Async::Loop> while that L<Future> is
+still pending fails it with C<MCP server process left the loop before it
+exited>. The process leaves the loop with the transport that owns it, so its
+exit can no longer be observed from here, and a L<Future> that would wait for
+it forever is better ended with the reason it will not arrive. Wait for the
+close before removing the transport where the exit itself matters.
+
 =cut
 
 sub is_alive { !$_[0]->{closed} }
@@ -275,6 +341,31 @@ none and never fetches a tool list to do it.
 
 =cut
 
+=attr on_notification
+
+    my $transport = Net::Async::MCP::Transport::Stdio->new(
+        command         => [ 'my-mcp-server' ],
+        on_notification => sub {
+            my ( $transport, $notification ) = @_;
+            warn "$notification->{method}\n";
+        },
+    );
+
+Invoked for every server-initiated notification read from the subprocess
+stdout, with the decoded JSON-RPC notification as it stood on the wire -
+C<method> and, where the notification has any, C<params>. The
+C<notifications/progress> of a running C<tools/call> is what a caller usually
+waits for here, and it is only worth anything while the call is still running,
+which is why it is an event and not part of the L<Future> the call resolves
+with.
+
+Set through C<new> or C<configure> like any L<IO::Async::Notifier> event, or
+by a subclass implementing a method of this name. Notifications are dropped
+while nothing handles them: a server sends them whether or not this client
+asked, and there is nothing sensible to do with one no caller wants.
+
+=cut
+
 sub _on_stdout_read {
   my ( $self, $buffref, $eof ) = @_;
   $self->{buffer} .= $$buffref;
@@ -288,8 +379,24 @@ sub _on_stdout_read {
     my $response = eval { $self->{json}->decode($line) };
     next unless $response && ref $response eq 'HASH';
 
+    # A line that answers no request is a notification the server sent of its
+    # own accord, and goes to the event rather than the pending table: the
+    # notifications/progress of a running tools/call is only worth anything
+    # while the call is still running. A line with neither an id nor a method
+    # is no JSON-RPC message this client can place at all, and is dropped.
     my $id = $response->{id};
-    next unless defined $id;
+    if (!defined $id) {
+      next unless defined $response->{method};
+      $self->maybe_invoke_event(on_notification => $response);
+      next;
+    }
+
+    # An id with neither a result nor an error is a server-initiated request,
+    # which this client does not answer. It has to be recognised before the
+    # lookup below rather than after it: the server numbers its own requests,
+    # nothing keeps those numbers apart from ours, and a collision would
+    # otherwise answer a live request of ours with nothing.
+    next unless exists $response->{result} || exists $response->{error};
 
     my $future = delete $self->{pending}{$id};
     next unless $future;

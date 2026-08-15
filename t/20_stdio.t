@@ -196,4 +196,142 @@ $loop->add($mcp);
   is($probe, undef, 'transport is freed once closed, removed from the loop and dropped');
 }
 
+# Server-initiated notifications. A server writes notifications/progress and
+# notifications/message on its own while a long running call is still in
+# flight, so a line with no id has to reach the caller as it lands instead of
+# being dropped for answering no request. The subprocess below writes all four
+# lines before the one that answers, so the request's own future arriving is
+# proof that everything ahead of it was read: nothing here sleeps or polls.
+{
+  my @notes;
+  my $transport = Net::Async::MCP::Transport::Stdio->new(
+    command => [
+      $^X, '-MJSON::MaybeXS', '-e', q{
+        my $json = JSON::MaybeXS->new(utf8 => 1);
+        $| = 1;
+        while (defined(my $line = <STDIN>)) {
+          chomp $line;
+          next if $line eq '';
+          my $message = $json->decode($line);
+          next unless defined $message->{id};
+          print $json->encode({
+            jsonrpc => '2.0',
+            method  => 'notifications/progress',
+            params  => { progressToken => 'tok', progress => 1 },
+          }), "\n";
+          # A request of the server's own, numbered from the server's counter
+          # and so colliding with the client's pending id.
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            method  => 'roots/list',
+          }), "\n";
+          # Neither a request nor a response nor a notification.
+          print $json->encode({ jsonrpc => '2.0' }), "\n";
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            result  => { answered => $message->{method} },
+          }), "\n";
+        }
+      },
+    ],
+    on_notification => sub {
+      my ( undef, $note ) = @_;
+      push @notes, $note;
+    },
+  );
+  $loop->add($transport);
+
+  my $result = $transport->send_request('tools/call', { name => 'slow' })->get;
+  ok(defined $result,
+    'a server-initiated request sharing the id does not settle the pending request');
+  is($result, { answered => 'tools/call' }, 'the response is what settles it');
+
+  is(scalar @notes, 1, 'exactly the one notification line was delivered');
+  is($notes[0]{method}, 'notifications/progress',
+    'the notification arrives with the method the server sent');
+  is($notes[0]{params}{progress}, 1, 'and with its params');
+
+  # Net::Async::MCP hands its own on_notification down with configure, so a
+  # handler set after construction has to take over from there.
+  my @later;
+  $transport->configure(on_notification => sub {
+    my ( undef, $note ) = @_;
+    push @later, $note;
+  });
+  $transport->send_request('ping')->get;
+  is(scalar @later, 1, 'a handler set through configure receives notifications');
+  is(scalar @notes, 1, 'and the handler it replaced receives no more');
+
+  $transport->close->get;
+  $loop->remove($transport);
+}
+
+# A close and a request still running when the transport leaves the loop. The
+# process is a child of the transport and goes out with it, which unwatches
+# the child, so _on_finish never fires: the close future would wait for an
+# exit nobody is watching for any more, and the request for an answer that
+# cannot be read any more. Both are settled by the same hook, so both are
+# exercised in one removal here. Nothing is timing-dependent: the loop does
+# not run between the two sends and the remove, so neither the response nor
+# on_finish can have arrived in the window either way.
+{
+  my $transport = Net::Async::MCP::Transport::Stdio->new(
+    command => [
+      $^X, '-MJSON::MaybeXS', '-e', q{
+        my $json = JSON::MaybeXS->new(utf8 => 1);
+        $| = 1;
+        while (defined(my $line = <STDIN>)) {
+          chomp $line;
+          next if $line eq '';
+          my $message = $json->decode($line);
+          next unless defined $message->{id};
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            result  => {},
+          }), "\n";
+        }
+      },
+    ],
+  );
+  $loop->add($transport);
+
+  # A round trip, so the process is up and has a live child watch for close to
+  # take away again.
+  $transport->send_request('ping')->get;
+
+  my $unanswered = $transport->send_request('tools/call', { name => 'slow' });
+  my $closing = $transport->close;
+  ok(!$closing->is_ready, 'close is still pending while the process is dying');
+  ok(!$unanswered->is_ready, 'and the request is still waiting for its answer');
+
+  $loop->remove($transport);
+
+  # Read out of the futures only once they are ready: Future::failure runs the
+  # loop until the future is, so asking a still-orphaned one would hang here
+  # rather than report the very thing this block is about.
+  my $failure   = $closing->is_failed    ? scalar $closing->failure    : undef;
+  my $abandoned = $unanswered->is_failed ? scalar $unanswered->failure : undef;
+
+  ok($closing->is_ready, 'leaving the loop ends the close future instead of orphaning it');
+  ok($closing->is_failed, 'it ends as a failure: nothing here observed the process exit');
+  like($failure, qr/left the loop before it exited/,
+    'the failure says why the exit will not be reported');
+
+  ok($unanswered->is_ready, 'leaving the loop ends the pending request as well');
+  ok($unanswered->is_failed, 'it too ends as a failure: its answer cannot arrive any more');
+  like($abandoned, qr/left the loop before the request was answered/,
+    'and names its own loss rather than the process exit');
+  # Spelled out rather than left to isnt, which an absent failure would
+  # satisfy on its own: what is asserted is that both arrived and that they
+  # read differently, so unifying the two messages fails here too.
+  ok(defined $abandoned && defined $failure && $abandoned ne $failure,
+    'the two losses are told apart by their message');
+
+  is(scalar keys %{ $transport->{pending} }, 0,
+    'the pending table is emptied, so nothing is left for _on_finish to settle twice');
+}
+
 done_testing;

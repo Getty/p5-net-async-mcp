@@ -10,6 +10,20 @@
     offers more than a hundred pages, fails the call loudly rather than
     returning what happened to arrive - a truncated list is indistinguishable
     from a short one, which is the same bug moved to a later page
+  - Fixed the Stdio transport dropping every notification its server sends,
+    the same gap the HTTP transport had before it read SSE incrementally, and
+    delivered them to on_notification instead. Fixing the triage exposed a
+    worse one alongside it: a message carrying an id but no result or error is
+    a server-initiated request, and it went straight into the pending lookup -
+    the server numbers its requests from its own counter, so its id 1 answered
+    a caller's waiting id 1 with undef and a live tools/call silently received
+    nothing
+  - Fixed the Stdio transport leaving futures pending forever when it is
+    removed from its loop while requests or a close are in flight. Removal
+    takes the subprocess with it and unwatches the child, so the exit that
+    would have settled them is never seen. They now fail, saying that rather
+    than claiming an exit nothing observed, with the request case and the close
+    case distinguishable from one another
   - A server refusing the client's protocol version is now answered by
     switching to one it offers and sending the request again, once, with the
     agreed version kept for everything that follows. Previously the refusal
