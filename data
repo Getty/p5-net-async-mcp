@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T00:17:16Z
+created: 2026-08-14T22:37:54Z
+id: 16
+priority: low
+started: 2026-08-14T22:59:59Z
+status: done
+tags:
+- stdio
+title: close-Future verwaist bei loop->remove waehrend close laeuft
+updated: 2026-08-15T00:17:16Z
+---
+
+Vorbestehend, gemessen beim Retention-Ticket #13: ruft man $loop->remove($transport), waehrend ein close noch laeuft, wird das close_future nie erfuellt - loop->remove entfernt den IO::Async::Process rekursiv mit und unwatched damit das Kind, _on_finish feuert also nie. Verhaelt sich vor und nach dem Retention-Fix identisch, ist also unabhaengig davon. Niedrig, weil die Reihenfolge close->get dann remove die normale ist.
