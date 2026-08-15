@@ -1,0 +1,15 @@
+---
+class: standard
+completed: 2026-08-15T00:30:59Z
+created: 2026-08-15T00:18:25Z
+id: 24
+priority: high
+started: 2026-08-15T00:18:36Z
+status: done
+tags:
+- protocol
+title: Default-Protokollversion fest verdrahten statt aus MCP::Constants
+updated: 2026-08-15T00:30:59Z
+---
+
+Vom Maintainer entschieden. $DEFAULT_PROTOCOL_VERSION kommt aus MCP::Constants::PROTOCOL_VERSION der installierten MCP - zieht die auf eine neue Revision, folgt unser Default still hinterher und der Client schickt neues _meta mit den Request-Formen der alten Revision. Dasselbe Argument wie bei der Versionsliste fuer die Renegotiation, die in 22a0adf schon invertiert wurde. Der Default soll die Revision sein, deren Formen dieser Client baut - also aus @SPOKEN_PROTOCOL_VERSIONS abgeleitet und nicht mehr aus MCP::Constants gelesen. Aendert dokumentiertes Verhalten, POD muss mit.
