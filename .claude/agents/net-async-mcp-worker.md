@@ -5,11 +5,11 @@ model: opus
 allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
-    - perl-core
+    - getty-perl-core
     - perl-mcp
     - perl-io-async-future
     - perl-release-dist-ini
-    - perl-release-author-getty
+    - getty-perl-release-author-getty
 ---
 
 You are the worker for **Net::Async::MCP**, an async MCP (Model Context Protocol) client for IO::Async with three pluggable transports (InProcess, Stdio, HTTP).
@@ -25,4 +25,4 @@ Implement, refactor, debug, and test code in this distribution. The conventions 
   - Server-initiated notifications (`notifications/progress`, `list_changed`) are silently dropped by both `Stdio` and `HTTP` transports — there is no callback/event API exposing them to callers.
   - No test coverage for `Transport::HTTP` beyond the load check in `t/00_load.t`.
 - **Every `lib/*.pm` currently carries its own `our $VERSION`** (legacy per-file style, consistent across the four files). The current house convention for new `[@Author::GETTY]` dists is `version_finder = :MainModule` in `dist.ini` plus `$VERSION` only in the main module — this dist hasn't been migrated to that. Ask before doing so; it's a deliberate style choice, not a defect.
-- GitHub Issues on `Getty/p5-net-async-mcp` are user-facing — never act on them without explicit instruction (see `.claude/rules/net-async-mcp-rules.md`). For internal AI-to-AI coordination, `karr` is available (skill hardlinked at `.claude/skills/karr/`) but no board is initialized here yet; this is a small single-distribution repo, so one is rarely needed.
+- GitHub Issues on `Getty/p5-net-async-mcp` are user-facing — never act on them without explicit instruction (see `.claude/rules/net-async-mcp-rules.md`). For internal AI-to-AI coordination, `kanban-issues-karr-cli` is available (skill hardlinked at `.claude/skills/karr/`) but no board is initialized here yet; this is a small single-distribution repo, so one is rarely needed.
