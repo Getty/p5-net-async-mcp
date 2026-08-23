@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use Future;
-use MCP::Server::Context;
 use Scalar::Util qw( blessed );
 use Carp qw( croak );
 
@@ -31,6 +30,16 @@ directly on the server object, passing a fresh L<MCP::Server::Context> with
 each request, making it the most efficient transport for Perl-based MCP
 servers running in the same process. The context carries no scopes, so
 L<MCP::Server>'s OAuth scope checks impose no restriction for this transport.
+
+L<MCP> is a recommendation of this distribution rather than a requirement, so
+L<MCP::Server::Context> is loaded when the first request is sent instead of
+when this module is compiled: without it the module still loads, and so does
+the rest of the distribution, which needs no part of L<MCP> at all. Where the
+context class cannot be loaded, C<handle()> is called with the request as its
+only argument. Nothing is lost by that, because without L<MCP> there is no
+L<MCP::Server> to hand this transport either - only some other object with a
+C<handle()> method, which never had a context coming. Install L<MCP> and every
+request carries one again, with no change to anything here.
 
 If a tool returns a L<Mojo::Promise> (from an async MCP server
 implementation), the promise is resolved synchronously via C<wait()>. For
@@ -63,8 +72,9 @@ sub new {
 
 Constructs a new in-process transport. Requires a C<server> argument which
 must be an L<MCP::Server> instance (or any object with a C<handle> method
-that accepts a JSON-RPC request hashref and an L<MCP::Server::Context>
-instance).
+that accepts a JSON-RPC request hashref, followed by an
+L<MCP::Server::Context> instance where L<MCP> is installed and by nothing at
+all where it is not).
 
 =cut
 
@@ -80,7 +90,7 @@ sub send_request {
     defined $params ? ( params => $params ) : (),
   };
 
-  my $response = $self->{server}->handle($request, MCP::Server::Context->new);
+  my $response = $self->{server}->handle($request, $self->_context);
 
   # Handle Mojo::Promise from async MCP tools
   if (blessed($response) && $response->isa('Mojo::Promise')) {
@@ -162,7 +172,7 @@ sub send_notification {
     defined $params ? ( params => $params ) : (),
   };
 
-  $self->{server}->handle($request, MCP::Server::Context->new);
+  $self->{server}->handle($request, $self->_context);
   return Future->done;
 }
 
@@ -210,6 +220,21 @@ annotated with C<x-mcp-header> into, so L<Net::Async::MCP/call_tool> resolves
 none and never fetches a tool list to do it.
 
 =cut
+
+sub _context {
+  my ( $self ) = @_;
+
+  # Loaded here rather than at compile time because MCP is a recommendation of
+  # this distribution and not a requirement, and a use would have made every
+  # consumer of this transport depend on it. Returning nothing where it is
+  # missing hands handle() the request alone, which is the whole call an object
+  # that is not an MCP::Server was ever going to get - see the DESCRIPTION.
+  $self->{has_context} = eval { require MCP::Server::Context; 1 } || 0
+    unless defined $self->{has_context};
+
+  return unless $self->{has_context};
+  return MCP::Server::Context->new;
+}
 
 sub _process_response {
   my ( $self, $response ) = @_;

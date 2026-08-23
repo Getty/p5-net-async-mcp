@@ -1,4 +1,23 @@
 {{$NEXT}}
+  - Fixed the test suite dying instead of testing wherever MCP is not
+    installed, which is every smoker that installs only what a distribution
+    requires. MCP is a recommendation and not a requirement because only the
+    in-process transport touches any part of it, and the two others should not
+    drag Mojolicious and CryptX into an installation that never uses them - but
+    almost every test needs a real MCP::Server, and 0.004 dropped MCP from the
+    test phase, where it had been since the first commit. It is a test
+    requirement again, so a smoker installs it and the suite tests rather than
+    skips, and the tests that cannot run without it - the in-process, client
+    and stdio ones - now skip on its absence instead of failing at compile time
+  - Transport::InProcess no longer needs MCP to be loadable. It loaded
+    MCP::Server::Context with a plain use, so the module could not be compiled
+    at all where MCP was missing, which is what took t/00_load.t and
+    t/40_errors.t down with it. The context class is loaded at the first
+    request now, and where it cannot be loaded handle() is called with the
+    request as its only argument. That costs an MCP::Server nothing, because
+    without MCP there is no MCP::Server to hand this transport in the first
+    place - only some other object with a handle() method, which never had a
+    context coming
 
 0.004     2026-08-15 16:13:38Z
   - Added an on_subscription_end event, so a caller is told when a

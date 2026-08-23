@@ -9,4 +9,5 @@ recommends 'HTTP::Message';
 
 on test => sub {
   requires 'Test2::V0';
+  requires 'MCP', '>= 0.15';
 };

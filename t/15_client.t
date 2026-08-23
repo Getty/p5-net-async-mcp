@@ -6,7 +6,12 @@ use Future;
 use IO::Async::Loop;
 use Scalar::Util qw( weaken );
 use Net::Async::MCP;
-use MCP::Server;
+
+# The stub servers below are scripted by hand, but the client behaviour they
+# script is pinned against a real MCP::Server, and MCP is a recommendation of
+# this distribution rather than a requirement.
+skip_all 'MCP is required for the client tests'
+  unless eval { require MCP::Server; 1 };
 
 # Transport-independent client behaviour: request building, retries,
 # renegotiation and event dispatch that do not depend on which transport
