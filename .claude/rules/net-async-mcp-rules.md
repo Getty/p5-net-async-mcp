@@ -67,4 +67,4 @@ This is a small, single-distribution repo with no driver family and typically on
 time, so a board is rarely needed in practice — reach for it when work genuinely spans
 multiple sessions or subagents and needs to survive a context reset, not for routine
 single-session tasks. No board is initialized here yet; run `karr init` first if one becomes
-useful. Full command surface: skill `karr`.
+useful. Full command surface: skill `kanban-issues-karr-cli`.
