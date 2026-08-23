@@ -1,0 +1,19 @@
+---
+class: standard
+created: 2026-08-23T22:04:03Z
+id: 29
+priority: medium
+status: backlog
+tags:
+- github
+title: 'Nach dem naechsten Release: GH #1 und #2 schliessen'
+updated: 2026-08-23T22:04:03Z
+---
+
+Beide Issues von eserte sind beantwortet, aber bewusst offen geblieben.
+
+GH #1 (has_scope on unblessed reference): Fix ist seit 0.003 draussen. Offen gelassen, damit eserte auf seinen Smokern gegenpruefen kann. Kann geschlossen werden, sobald ein Release mit dem GH-#2-Fix durch seine Smoker gelaufen ist -- vorher smoked er 0.004 nach und landet direkt in #2.
+
+GH #2 (MCP nicht installiert auf Smokern): Fix ist committet (4ba67fe), aber noch nicht released. Erst nach dem Release schliessen.
+
+Voraussetzung ist also ein Release, und das gibt es nur mit ausdruecklicher Freigabe des Maintainers. Dieses Ticket ist kein Auftrag zu releasen.
