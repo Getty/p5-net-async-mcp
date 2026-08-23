@@ -1,0 +1,46 @@
+---
+class: standard
+completed: 2026-08-23T22:03:43Z
+created: 2026-08-23T18:48:25Z
+id: 28
+priority: high
+started: 2026-08-23T20:34:17Z
+status: done
+tags:
+- github
+- mcp-api
+title: 'GH #1: has_scope auf unblessed reference -- MCP >= 0.12 erwartet ein Context-Objekt'
+updated: 2026-08-23T22:03:43Z
+---
+
+Gemeldet 2026-06-28 von eserte, GitHub-Issue #1. t/10_inprocess.t stirbt:
+
+  Cant call method "has_scope" on unblessed reference
+    at MCP/Server.pm line 189
+
+eserte hat die Regression eingegrenzt und die Tabelle mitgeliefert: mit MCP 0.08
+laeuft es, ab 0.12 bricht es -- und 0.13 ebenso.
+
+MCP/Server.pm:189 ist
+  next unless $context->has_scope(@{$tool->scopes});
+Ab 0.12 erwartet MCP::Server dort ein MCP::Server::Context-Objekt; dieser
+Transport reicht offenbar noch eine nackte Hash-Referenz durch.
+
+Derselbe Fehler steht als MCP-Run GH #1 auf dem Nachbarboard -- eine Ursache,
+zwei Distributionen. Zusammen loesen und nicht doppelt.
+
+Hier nicht reproduzierbar, weil MCP 0.15 installiert ist und der lokale Pfad
+offenbar ein Objekt uebergibt. Zum Nachstellen den Aufrufpfad des Transports
+gegen MCP 0.12 pruefen.
+
+
+[2026-08-23, help-rest] Kein Code-Fix noetig -- das ist seit Commit 2b860b6 (2026-07-12) behoben und in 0.003 sowie 0.004 released. Belegt: git tag --contains 2b860b6 nennt 0.003 und 0.004, MetaCPAN bestaetigt beide als veroeffentlicht.
+
+Der Fix baut pro Request und pro Notification ein frisches MCP::Server::Context, statt eine nackte Hash-Referenz durchzureichen. Deckt sich exakt mit eseretes Regressionstabelle: MCP 0.10 machte Context zu einer echten Klasse, 0.11 fuehrte die Scope-Pruefungen ein, die Methoden darauf rufen -- daher 0.08 gruen und ab 0.12 tot.
+
+eserte smokte am 2026-06-28, da war 0.002 aktuell. Nichts zu tun ausser antworten.
+
+Wichtig fuer die Antwort: 0.004 faellt auf einem frischen Smoker weiterhin um, aber wegen GH #2 (karr #27). Das gehoert dazu, sonst smoked er nach und landet direkt im naechsten Fehler.
+
+
+[2026-08-23, help-rest] Antwort gepostet: https://github.com/Getty/p5-net-async-mcp/issues/1#issuecomment-5388708732 -- Issue bewusst offen gelassen, nur kommentiert.
