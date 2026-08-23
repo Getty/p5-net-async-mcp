@@ -1,0 +1,62 @@
+---
+class: standard
+completed: 2026-08-23T22:03:51Z
+created: 2026-08-23T18:47:58Z
+id: 27
+priority: high
+started: 2026-08-23T20:22:56Z
+status: done
+tags:
+- github
+- prereqs
+title: 'GH #2: MCP steht als recommends im cpanfile, wird aber hart geladen'
+updated: 2026-08-23T22:03:51Z
+---
+
+Gemeldet 2026-08-16 von eserte (Slaven Rezic) auf seinen Smokern, GitHub-Issue #2.
+
+t/00_load.t und t/10_inprocess.t brechen ab:
+
+  Cant locate MCP/Server/Context.pm in @INC
+    at Net/Async/MCP/Transport/InProcess.pm line 7
+  Cant locate MCP/Server.pm in @INC
+    at t/10_inprocess.t line 9
+
+Ursache: das cpanfile fuehrt MCP unter "recommends", nicht unter "requires":
+
+  recommends "MCP", ">= 0.15";
+
+InProcess.pm laedt MCP::Server::Context aber unbedingt in Zeile 7. Auf einer
+Maschine ohne installiertes MCP -- also auf jedem frischen Smoker -- wird das
+Modul nicht mitinstalliert und der Ladevorgang stirbt. Hier faellt es nicht
+auf, weil MCP 0.15 installiert ist.
+
+Entscheidung noetig: entweder MCP zu requires machen (dann ist es eine harte
+Abhaengigkeit dieser Distribution), oder die Transports so laden, dass ein
+fehlendes MCP zu einem sauberen skip fuehrt statt zu einem Compile-Fehler.
+Dasselbe Muster in jedem Transport pruefen, nicht nur in InProcess.
+
+2026-08-23 20:33 Umgesetzt und verifiziert, nichts committet.
+
+Ursache war praeziser als das Ticket vermutete: Commit 0b8180c (Removed unnecessary test requirement, 2026-08-15) hat requires MCP >= 0.15 aus dem on-test-Block geworfen; v0.004 ging am selben Tag raus, eserte smokte am Tag darauf. recommends wird von cpanm nur mit --with-recommends gezogen, Smoker fahren nur requires.
+
+Keine Entscheidung noetig, die Codebase hatte sie schon: Net::Async::HTTP und HTTP::Message stehen ebenfalls unter recommends, werden per require zur Laufzeit geladen und ihre Tests skippen sauber. Nur InProcess.pm folgte dem nicht.
+
+Beide Teile umgesetzt:
+- cpanfile: requires MCP >= 0.15 zurueck in den on-test-Block (Revert von 0b8180c)
+- InProcess.pm: Context wird per _context() zur Laufzeit geladen, Ergebnis pro Instanz gecacht. Fehlt MCP, wird handle() nur mit dem Request gerufen -- ohne MCP kann es keinen echten MCP::Server geben, nur Duck-Type-Objekte, die nie einen Context erwarteten. POD in DESCRIPTION und =method new nachgezogen.
+- Neu t/11_context.t: prueft beide Haelften der Regel, laeuft in beiden Umgebungen
+- skip_all in t/10_inprocess.t, t/15_client.t, t/20_stdio.t
+
+Verifiziert:
+- prove -lr t/ mit MCP 0.15: 395 Tests gruen (vorher 387, keiner verloren)
+- prove -lr t/ mit per @INC-Hook verstecktem MCP: 202 Tests gruen, drei Dateien geskippt, kein Compile-Fehler, 2s also kein Haenger
+- META.json aus dzil build: runtime/recommends MCP 0.15, test/requires MCP 0.15. Der Bundle nutzt Prereqs::FromCPANfile und nicht AutoPrereqs, das require im Code wandert also nicht zurueck in die runtime-requires
+- dzil test: 399 Tests gruen inklusive author-pod-syntax
+
+Achtung beim Committen: Author::GETTY nutzt Git::GatherDir. t/11_context.t war untracked und fehlte deshalb im gebauten Dist -- dzil test lief mit 391 statt 399 Tests. Datei ist jetzt gestaged, aber nicht committet.
+
+Offen: die Antwort auf GH #2.
+
+
+[2026-08-23, help-rest] Committet als 4ba67fe auf main (noch nicht gepusht). Antwort gepostet: https://github.com/Getty/p5-net-async-mcp/issues/2#issuecomment-5388708833 -- Issue offen gelassen, der Fix ist noch nicht released.
