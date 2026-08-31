@@ -1,0 +1,2 @@
+claude: true
+prompt: "Drain the net-async-mcp board. Delegate behavior-relevant work to net-async-mcp-worker; run `dzil test` (or `prove -lr t/`) to verify; never run `dzil release`, upload to CPAN, or act on a GitHub issue. Stop when nothing actionable remains."
