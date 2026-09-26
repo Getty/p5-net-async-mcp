@@ -32,7 +32,7 @@ This rule depends on whether the Agent/Task tool is available to you.
 
 - **You can spawn subagents** (orchestrating main agent): do NOT touch behavior-relevant code
   in this distribution yourself — delegate to `net-async-mcp-worker`. Your lane: coordinate,
-  inspect, plan, review diffs, run tests, manage git, edit non-behavioral docs (README, POD via
+  inspect, plan, review diffs, run tests, edit non-behavioral docs (README, POD via
   `net-async-mcp-doc-writer`). Why: only `net-async-mcp-worker` gets the full Perl/MCP/IO::Async skill set
   force-loaded via `briefing.skills`; you get no briefing and would touch internals with too
   little context.
@@ -41,6 +41,9 @@ This rule depends on whether the Agent/Task tool is available to you.
 
 Behavior-relevant = runtime behavior of the three transports (InProcess, Stdio, HTTP), the
 public API, MCP protocol handling, error handling, tests, performance.
+
+**Only `net-async-mcp-release-manager` commits.** A worker leaves a commit-ready tree and hands its card
+to `review`; you then dispatch `net-async-mcp-release-manager` to cut the commit and close the card.
 
 ## Release — never without permission
 
@@ -63,11 +66,11 @@ maintainer's name.
 
 For coordination that stays between agents/sessions — not user-facing — use `karr`
 (git-native kanban; state lives in `refs/karr/*`), skill hardlinked at
-`.claude/skills/kanban-issues-karr-cli/`. This is a small, single-distribution repo with no
+`.claude/skills/kanban-issues-karr-coordination/`. This is a small, single-distribution repo with no
 driver family and typically one agent at a time, so a board is rarely needed in practice —
 reach for it when work genuinely spans multiple sessions or subagents and needs to survive a
 context reset, not for routine single-session tasks. A board is already initialized here
 (`karr board`) — do not run `karr init`. When fanning work out, serialize board mutations
 (`karr move`/`handoff`/`sync`): parallel implementation is fine, but concurrent board writes
 have OOM-rebooted a host — collect results, then loop the writes sequentially. Full command
-surface: skill `kanban-issues-karr-cli`.
+surface: skill `kanban-issues-karr-coordination`.

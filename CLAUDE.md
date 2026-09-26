@@ -17,13 +17,13 @@ principle and the lane boundaries are in `.claude/rules/net-async-mcp-rules.md`.
 | Task | Agent |
 |---|---|
 | Implement / refactor / debug / test anything under `lib/` | `net-async-mcp-worker` (default) |
-| Pre-release audit | `net-async-mcp-release-checker` |
+| Commits, `Changes`, card → done, pre-release audit | `net-async-mcp-release-manager` |
 | POD | `net-async-mcp-doc-writer` |
 
 The agents carry their skills via `briefing.skills` (see `.claude/agents/`); the main agent
 delegates rather than loading them. Skill sources live under `.claude/skills/` —
 `getty-perl-core`, `getty-perl-release-author-getty`, `perl-release-dist-ini`,
-`perl-io-async-future` and `perl-mcp` are hardlinked shared skills, `kanban-issues-karr-cli`
+`perl-io-async-future` and `perl-mcp` are hardlinked shared skills, `kanban-issues-karr-coordination`
 from the karr source; `net-async-mcp-core` is owned by this repo.
 
 Internal AI-to-AI work is coordinated on the repo's `karr` board (`karr board`). GitHub
