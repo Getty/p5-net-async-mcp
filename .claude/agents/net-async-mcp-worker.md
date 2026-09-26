@@ -2,7 +2,6 @@
 name: net-async-mcp-worker
 description: "Default Net::Async::MCP worker — implement, refactor, debug, and test code in this distribution. Pre-loaded with all Perl/MCP/IO::Async conventions and this repo's architecture, transport boundaries, known gaps and version style. Leaves a commit-ready tree; never commits — commits belong to net-async-mcp-release-manager."
 model: opus
-allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - getty-perl-core

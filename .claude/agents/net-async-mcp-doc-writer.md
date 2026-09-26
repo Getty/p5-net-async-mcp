@@ -2,7 +2,7 @@
 name: net-async-mcp-doc-writer
 description: "Write and maintain Net::Async::MCP POD in the [@Author::GETTY] PodWeaver house format — inline =method / =attr / =func next to the code they document, SYNOPSIS, SEE ALSO, no manually-written NAME/AUTHOR/SUPPORT. One module at a time; specify the path under lib/Net/Async/."
 model: sonnet
-allowed-tools: Read, Edit, Grep, Glob
+disallowedTools: Write, NotebookEdit, Bash
 briefing:
   skills:
     - net-async-mcp-core

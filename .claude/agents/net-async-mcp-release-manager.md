@@ -2,7 +2,6 @@
 name: net-async-mcp-release-manager
 description: "Owns net-async-mcp's commits and release readiness — cuts commits from the worker's commit-ready tree, writes commit messages and Changes entries, moves karr cards to done. Release audit: Net::Async::MCP before release — cpanfile deps declared and pinned (MCP pin intact), the single-$VERSION :MainModule strategy honoured, Changes/{{$NEXT}} current, dzil build clean. Workers never commit; this agent does. Never pushes, tags or releases."
 model: sonnet
-allowed-tools: Read, Edit, Write, Bash, Glob, Grep
 briefing:
   skills:
     - getty-git-commit-style
