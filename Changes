@@ -1,4 +1,4 @@
-{{$NEXT}}
+0.005     2026-10-18 23:49:38Z
   - Fixed the test suite dying instead of testing wherever MCP is not
     installed, which is every smoker that installs only what a distribution
     requires. MCP is a recommendation and not a requirement because only the
