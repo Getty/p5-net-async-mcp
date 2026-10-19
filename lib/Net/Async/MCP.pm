@@ -85,11 +85,14 @@ both JSON and SSE responses. See L<Net::Async::MCP::Transport::HTTP>.
 =back
 
 All methods return L<Future> objects and work with L<Future::AsyncAwait>.
-Call L</initialize> first before using any other MCP methods. It performs the
-handshake with a single C<server/discover> request of the revision this client
-speaks (see L</protocol_version>; the legacy C<initialize> request no longer
-exists in it), carrying the client's protocol version, capabilities, and info
-in C<_meta>.
+Call L</initialize> first before using any other MCP methods. The client
+speaks both eras of the protocol: the modern revision C<2026-07-28>, whose
+handshake is a single C<server/discover> and whose requests carry the
+client's protocol version, capabilities and info in C<_meta>, and the legacy
+revisions C<2025-11-25> back to C<2024-11-05> with their C<initialize>
+handshake, which is what servers built on today's SDKs speak. Unless told
+otherwise through L</protocol_version>, L</initialize> finds out which one the
+server speaks.
 
 Cancelling the L<Future> of a request cancels the request itself - the
 transport drops it and, over Stdio, tells the server - on perl 5.24 and later.
@@ -100,9 +103,9 @@ connection.
 
 =cut
 
-# The protocol revisions this client speaks, newest first: the first of them is
-# what a client that was not told otherwise sends, and they are the only ones a
-# refused request may be renegotiated into.
+# The modern protocol revisions this client speaks, newest first: the first of
+# them is what a client that was not told otherwise sends, and they are the
+# only ones a refused request may be renegotiated into.
 #
 # What belongs in here is decided by the code below and by nothing else: an
 # entry means that what this file builds is what that revision defines - today
@@ -117,14 +120,23 @@ connection.
 # Deliberately not MCP::Constants::SUPPORTED_VERSIONS: that list says what the
 # installed server library accepts, which is a different question whose answer
 # only happens to be the same one today.
-my @SPOKEN_PROTOCOL_VERSIONS = ('2026-07-28');
+my @MODERN_PROTOCOL_VERSIONS = ('2026-07-28');
+
+# The legacy revisions this client speaks, newest first: the ones with an
+# initialize/initialized handshake and no protocol keys in _meta, which is what
+# every third-party server speaks today. The same rule as above decides what
+# goes in here - what this file builds for them, the handshake, the plain
+# requests and the absent _meta, is the same in all four, and a revision whose
+# requests differ from that is not one to add without teaching the client the
+# difference first.
+my @LEGACY_PROTOCOL_VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05');
 
 # What this client sends when the caller named no protocol_version: the newest
 # revision it speaks. Deliberately not MCP::Constants::PROTOCOL_VERSION - that
 # is the revision the installed server library implements, and following it
 # onto a newer one would put that version string on requests this file still
 # builds in the old one, for the reason spelled out above.
-my $DEFAULT_PROTOCOL_VERSION = $SPOKEN_PROTOCOL_VERSIONS[0];
+my $DEFAULT_PROTOCOL_VERSION = $MODERN_PROTOCOL_VERSIONS[0];
 
 # The code a server answers a request made in a revision it does not speak
 # with. The number the specification gives it, written out rather than read
@@ -133,10 +145,22 @@ my $DEFAULT_PROTOCOL_VERSION = $SPOKEN_PROTOCOL_VERSIONS[0];
 # has no reason to have L<MCP> installed at all.
 my $UNSUPPORTED_PROTOCOL_VERSION = -32022;
 
+# The errors only a modern server answers with - HeaderMismatch,
+# MissingRequiredClientCapability and UnsupportedProtocolVersion. A probe
+# refused with one of them was refused by a modern server, and must not fall
+# back to initialize; any other error says the server is legacy.
+my %MODERN_ERROR_CODES = map { $_ => 1 } ( -32020, -32021, $UNSUPPORTED_PROTOCOL_VERSION );
+
+# How long the server/discover probe of a stdio server may stay unanswered
+# before the server is taken to be legacy. Generous because a slow start - an
+# npx that first has to fetch its package - looks exactly like a server that
+# will never answer.
+my $DEFAULT_DISCOVER_TIMEOUT = 10;
+
 # The settings this client keeps to itself, whichever transport it ends up
 # with.
 my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
-  on_input_request );
+  on_input_request discover_timeout );
 
 # The settings handed on to the transport instead, each with the class a
 # transport has to be for it to reach it. Kept apart from @CLIENT_KEYS because
@@ -151,23 +175,28 @@ my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
 # have. on_subscription_end has only the HTTP transport to go to, a stream
 # being the one thing a subscription can end on. The InProcess transport is no
 # L<IO::Async::Notifier>, has no C<configure> and no events at all, so it
-# matches nothing here and is handed nothing.
+# matches nothing here and is handed nothing. env, cwd and on_stderr describe
+# a subprocess, which only the Stdio transport has.
 my %TRANSPORT_KEYS = (
   headers               => 'Net::Async::MCP::Transport::HTTP',
   timeout               => 'Net::Async::MCP::Transport::HTTP',
   stall_timeout         => 'Net::Async::MCP::Transport::HTTP',
   on_notification       => 'IO::Async::Notifier',
   on_subscription_end   => 'Net::Async::MCP::Transport::HTTP',
+  env                   => 'Net::Async::MCP::Transport::Stdio',
+  cwd                   => 'Net::Async::MCP::Transport::Stdio',
+  on_stderr             => 'Net::Async::MCP::Transport::Stdio',
 );
 
 # The keys of %TRANSPORT_KEYS that are events of this client rather than
 # settings. They travel to the transport wrapped - see _event_handler - and
 # are asked for by event rather than by key, because a subclass method of that
 # name is a handler just as much as a configured code ref is.
-my %EVENT_KEYS = map { $_ => 1 } qw( on_notification on_subscription_end );
+my %EVENT_KEYS = map { $_ => 1 } qw( on_notification on_subscription_end on_stderr );
 
 sub _init {
   my ( $self, $params ) = @_;
+  $self->{protocol_version_pinned} = defined $params->{protocol_version};
   for my $key (@CLIENT_KEYS, keys %TRANSPORT_KEYS) {
     $self->{$key} = delete $params->{$key} if exists $params->{$key};
   }
@@ -179,6 +208,13 @@ sub _init {
 sub configure {
   my ( $self, %params ) = @_;
   my @changed = grep { exists $params{$_} } sort keys %TRANSPORT_KEYS;
+
+  # A protocol_version the caller names is a pin, which decides the handshake
+  # - see initialize. One left to its default is not, and neither is the
+  # version a handshake agreed on, which is set without passing through here.
+  $self->{protocol_version_pinned} = defined $params{protocol_version}
+    if exists $params{protocol_version};
+
   for my $key (@CLIENT_KEYS, keys %TRANSPORT_KEYS) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
@@ -255,7 +291,8 @@ sub _ensure_transport {
       unless $self->loop;
     require Net::Async::MCP::Transport::Stdio;
     $self->_build_transport('Net::Async::MCP::Transport::Stdio',
-      command => $self->{command});
+      command    => $self->{command},
+      on_request => $self->_server_request_handler);
   }
   elsif ($self->{url}) {
     croak "HTTP transport requires being added to an IO::Async::Loop"
@@ -290,6 +327,32 @@ sub _build_transport {
   return $transport;
 }
 
+# Private: the handler the Stdio transport hands the requests a server sends
+# to the client. Only a legacy server sends any: the modern revision has no
+# server-to-client requests - a server asks through input_required results
+# instead - so on a modern connection they stay unanswered, as they always
+# were. A legacy server gets an empty result for ping, which every revision
+# requires a client to answer, and METHOD_NOT_FOUND for everything else -
+# roots/list, sampling, elicitation - since the legacy handshake declares no
+# capability that would invite those. Weak for the same reason as
+# _event_handler: the client holds the transport that holds this.
+sub _server_request_handler {
+  my ( $self ) = @_;
+  weaken( my $weak_self = $self );
+  return sub {
+    my ( undef, $request ) = @_;
+    my $client = $weak_self or return;
+    return unless $client->is_legacy;
+
+    my $method = $request->{method};
+    return { result => {} } if $method eq 'ping';
+    return { error => {
+      code    => -32601,
+      message => "Method not found: $method",
+    } };
+  };
+}
+
 sub protocol_version { $_[0]->{protocol_version} }
 
 =method protocol_version
@@ -298,13 +361,23 @@ sub protocol_version { $_[0]->{protocol_version} }
 
 Returns (or via C<configure>/constructor argument C<protocol_version> sets) the
 MCP protocol revision this client speaks on the wire, such as C<'2026-07-28'>.
-Sent on every request inside C<_meta>. Defaults to the newest revision this
-client builds the requests of.
+After L</initialize> it is the revision the handshake agreed on. Defaults to
+the newest revision this client builds the requests of.
 
-A server that does not speak this revision answers with
+Naming one is a B<pin>, and decides which handshake L</initialize> performs.
+Left unset, the client speaks either era and finds out which one the server
+speaks - see L</initialize>. Pinned to one of the legacy revisions this client
+speaks - C<2025-11-25>, C<2025-06-18>, C<2025-03-26> or C<2024-11-05> - it goes
+straight to the C<initialize> handshake and asks for that revision, without
+probing first. Pinned to anything else, C<2026-07-28> above all, it speaks the
+modern revision only: a C<server/discover> carrying that version, and no
+falling back to C<initialize> if the server refuses it.
+
+In the modern revision it is sent on every request inside C<_meta>. A server
+that does not speak this revision answers with
 C<UNSUPPORTED_PROTOCOL_VERSION> (-32022) and names the ones it does. Where one
-of those is a revision this client speaks too - one whose request shapes it
-builds, which today is exactly one - the request goes out again in it, and this
+of those is a modern revision this client speaks too - one whose request shapes
+it builds, which today is exactly one - the request goes out again in it, and this
 attribute keeps it, so every following request carries the agreed revision from
 the start.
 
@@ -319,6 +392,67 @@ Nothing beyond that one retry: a refusal that offers no usable revision, and a
 second refusal after the switch, both reach the caller as the server's own
 error with its code and C<data>, because the revisions it named are in there
 and in nothing this client could put in its place.
+
+=cut
+
+sub is_legacy { ( $_[0]->{era} // '' ) eq 'legacy' ? 1 : 0 }
+
+=method is_legacy
+
+    await $mcp->initialize;
+    say 'legacy server, ', $mcp->protocol_version if $mcp->is_legacy;
+
+True once L</initialize> has settled on a legacy revision - one with the
+C<initialize> handshake - and false before that and on a modern connection.
+The era is a property of the server, so it is decided by the handshake once
+and kept for as long as this client lives.
+
+What differs on a legacy connection: requests carry no
+C<io.modelcontextprotocol/*> keys in C<_meta> (a C<_meta> the caller passes
+travels as it is), the C<input_required> round trip and the renegotiation of a
+refused protocol version are modern-only and do not happen,
+L</subscriptions_listen> fails, and a C<ping> the server sends is answered
+while every other request it sends is refused with C<-32601>.
+
+=cut
+
+sub discover_timeout { $_[0]->{discover_timeout} // $DEFAULT_DISCOVER_TIMEOUT }
+
+=method discover_timeout
+
+    my $mcp = Net::Async::MCP->new(
+        command          => [ 'npx', '-y', 'some-mcp-server' ],
+        discover_timeout => 30,
+    );
+
+Returns (or via C<configure>/constructor argument C<discover_timeout> sets) how
+many seconds the C<server/discover> probe of L</initialize> waits for an
+answer from a stdio server before taking it to be legacy and falling back to
+the C<initialize> handshake. Defaults to 10. Set it to C<0> to wait for as
+long as it takes.
+
+The trade-off is real and has no right answer: a legacy server may answer an
+unknown request with nothing at all, and a modern server that is slow to start
+- an C<npx> that first has to fetch its package - looks exactly the same until
+it answers. Too short a limit takes a slow modern server for a legacy one, and
+its C<initialize> is then refused; too long a limit makes every start of a
+silent legacy server wait that long. A server whose era is known is better
+pinned through L</protocol_version>, which skips the probe altogether.
+
+Only the stdio transport waits on it. Over HTTP every request is answered with
+a status, and the InProcess transport answers on the spot.
+
+=cut
+
+sub instructions { $_[0]->{instructions} }
+
+=method instructions
+
+    my $text = $mcp->instructions;
+
+The free-form usage instructions for a model that the server sent with its
+handshake - C<instructions> of the C<server/discover> or the C<initialize>
+result - or undef where it sent none. Only available after L</initialize>.
 
 =cut
 
@@ -469,6 +603,39 @@ with a stream a subscription runs on, and L</subscriptions_listen> says as
 much. Setting this on a Stdio or InProcess client is therefore silently
 without effect.
 
+=attr env
+
+    my $mcp = Net::Async::MCP->new(
+        command => [ 'npx', '-y', '@modelcontextprotocol/server-github' ],
+        env     => { GITHUB_PERSONAL_ACCESS_TOKEN => $token },
+    );
+
+A HashRef laid over C<%ENV> for the server subprocess: a key with a value sets
+that variable, a key whose value is C<undef> removes it. Stdio transport only -
+see L<Net::Async::MCP::Transport::Stdio/env>.
+
+=attr cwd
+
+The working directory the server subprocess starts in. Stdio transport only -
+see L<Net::Async::MCP::Transport::Stdio/cwd>.
+
+=attr on_stderr
+
+    my $mcp = Net::Async::MCP->new(
+        command   => [ 'my-mcp-server' ],
+        on_stderr => sub {
+            my ( $mcp, $line ) = @_;
+            warn "mcp: $line\n";
+        },
+    );
+
+Invoked for every line the server subprocess writes to its stderr, decoded and
+without its line ending, with this client as the first argument. Stderr is the
+server's free-form log, never an error; the last 20 lines of it are quoted in
+the failure of every request the subprocess leaves unanswered when it exits,
+whether or not this is set. Stdio transport only - see
+L<Net::Async::MCP::Transport::Stdio/on_stderr>.
+
 =cut
 
 =attr on_input_request
@@ -577,18 +744,21 @@ sub _meta {
   return {
     'io.modelcontextprotocol/protocolVersion'    => $self->{protocol_version},
     'io.modelcontextprotocol/clientCapabilities' => $self->{client_capabilities},
-    'io.modelcontextprotocol/clientInfo'         => {
-      name    => 'Net::Async::MCP',
-      version => $VERSION,
-    },
+    'io.modelcontextprotocol/clientInfo'         => $self->_client_info,
   };
 }
 
+# Private: who this client is, as both eras' handshakes tell the server.
+sub _client_info { return { name => 'Net::Async::MCP', version => $VERSION } }
+
 # Private: merge a caller's C<_meta> (if any) into the standard one, returning
-# params that carry C<_meta> on every request.
+# params that carry C<_meta> on every request. A legacy revision has no
+# standard _meta: its requests carry the caller's own, if any, and otherwise
+# none at all.
 sub _with_meta {
   my ( $self, $params ) = @_;
   my %params = %{ $params // {} };
+  return \%params if $self->is_legacy;
   my %meta   = (%{ $self->_meta }, %{ $params{_meta} // {} });
   return { %params, _meta => \%meta };
 }
@@ -614,7 +784,7 @@ sub _renegotiated_version {
   my $supported = ref $error->{data} eq 'HASH' ? $error->{data}{supported} : undef;
   return undef unless ref $supported eq 'ARRAY';
 
-  my %usable = map { $_ => 1 } @SPOKEN_PROTOCOL_VERSIONS;
+  my %usable = map { $_ => 1 } @MODERN_PROTOCOL_VERSIONS;
   for my $version (@$supported) {
     next unless defined $version && !ref $version && $usable{$version};
 
@@ -647,7 +817,10 @@ async sub _request {
       ->followed_by(sub { Future->done( $_[0] ) });
 
     if ( $answered->is_failed ) {
-      my $version = $renegotiated ? undef : $self->_renegotiated_version($answered);
+      # Renegotiation is the modern revision's: a legacy server agreed on its
+      # version in the handshake and has no -32022 to refuse one with.
+      my $version = $renegotiated || $self->is_legacy
+        ? undef : $self->_renegotiated_version($answered);
 
       # Nothing to switch to, or one switch already made - which makes a second
       # refusal the server's problem and not one more version away from being
@@ -667,6 +840,9 @@ async sub _request {
 
     my $result = $answered->get;
 
+    # So is the input_required round trip: a legacy result is final whatever
+    # it carries, and one without a resultType is complete in every revision.
+    return $result if $self->is_legacy;
     return $result
       unless ref $result eq 'HASH'
       && ( $result->{resultType} // '' ) eq 'input_required';
@@ -762,9 +938,10 @@ sub server_info { $_[0]->{server_info} }
 
     my $info = $mcp->server_info;
 
-Returns the server info hashref from the MCP C<server/discover> handshake
-response. Contains at minimum C<name> and C<version> keys. Only available after
-L</initialize> has been called.
+Returns the server info hashref from the handshake - C<result._meta> of a
+modern C<server/discover>, C<serverInfo> of a legacy C<initialize>. Contains at
+minimum C<name> and C<version> keys. Only available after L</initialize> has
+been called.
 
 =cut
 
@@ -774,8 +951,8 @@ sub server_capabilities { $_[0]->{server_capabilities} }
 
     my $caps = $mcp->server_capabilities;
 
-Returns the server capabilities hashref from the MCP C<server/discover>
-handshake response. Only available after L</initialize> has been called.
+Returns the server capabilities hashref from the handshake response, modern or
+legacy. Only available after L</initialize> has been called.
 
 =cut
 
@@ -783,40 +960,231 @@ async sub initialize {
   my ( $self ) = @_;
   $self->_ensure_transport;
 
-  my $result = await $self->_request('server/discover');
-
-  # Read without autovivifying an _meta key into the result we hand back.
-  my $meta = $result->{_meta} // {};
-  $self->{server_info} = $meta->{'io.modelcontextprotocol/serverInfo'} // {};
-  $self->{server_capabilities} = $result->{capabilities} // {};
-
-  return $result;
+  # The era is the server's, so once a handshake has found it out it is not
+  # asked again; before that, a pin decides it, and without one the probe does.
+  my $era = $self->{era} // $self->_pinned_era // '';
+  return await $self->_legacy_handshake($self->{protocol_version}) if $era eq 'legacy';
+  return await $self->_modern_handshake if $era eq 'modern';
+  return await $self->_probe_handshake;
 }
 
 =method initialize
 
     my $result = await $mcp->initialize;
 
-Performs the MCP handshake. Must be called before any other MCP method. The
-current MCP revision has replaced the old C<initialize> request with
-C<server/discover>, which this method sends, carrying the client's protocol
-version and L</client_capabilities> in C<_meta>. The server responds with its
-capabilities and, in C<result._meta>, its server info.
+Performs the MCP handshake. Must be called before any other MCP method. This
+client speaks both eras of the protocol, and which handshake this is depends on
+the server:
 
-That single request is the whole handshake: no C<notifications/initialized>
-follows it. SEP-2575 removed the C<initialize>/C<initialized> pair along with
-the C<initialize> request itself, and the Streamable HTTP binding of this
-revision defines no client-to-server notifications at all, so the follow-up
-would have been an extra POST that no conforming server acts on.
+=over 4
 
-Returns the raw result hashref (C<capabilities> key, plus C<_meta> containing
-C<io.modelcontextprotocol/serverInfo>). Also populates the L</server_info> and
-L</server_capabilities> accessors.
+=item * B<Modern> - revision C<2026-07-28>. The handshake is a single
+C<server/discover> request carrying the client's protocol version and
+L</client_capabilities> in C<_meta>, and the server answers with its
+capabilities and, in C<result._meta>, its server info. No
+C<notifications/initialized> follows it: SEP-2575 removed the
+C<initialize>/C<initialized> pair, and the Streamable HTTP binding of this
+revision defines no client-to-server notifications at all.
 
-C<initialize> remains a compatibility alias for the handshake; there is no
-separate C<discover> entry point.
+=item * B<Legacy> - revisions C<2025-11-25>, C<2025-06-18>, C<2025-03-26> and
+C<2024-11-05>, which every third-party server speaks today. The handshake is
+an C<initialize> request carrying C<protocolVersion>, C<capabilities> and
+C<clientInfo>, answered with the server's C<protocolVersion>,
+C<capabilities>, C<serverInfo> and maybe C<instructions>, and followed by a
+C<notifications/initialized>. A server that answers with a revision this
+client does not speak fails the handshake with a message naming it and the
+ones this client speaks, and the transport is left as it is for
+L</shutdown>. The legacy handshake declares no client capabilities, whatever
+L</client_capabilities> says: a legacy server asks for sampling, elicitation
+or roots with requests of its own, which this client does not serve.
+
+=back
+
+Which one, is decided by L</protocol_version>. Pinned to a legacy revision,
+the legacy handshake asks for it; pinned to anything else, the modern
+handshake is the only one tried. Left unset, the client finds out the way the
+specification gives for a client of both eras: it probes with a
+C<server/discover> of the newest modern revision, and
+
+=over 4
+
+=item * an answer means the server is modern, and that is the handshake;
+
+=item * one of the errors only a modern server sends (C<-32020>, C<-32021>,
+C<-32022>) means the server is modern too, and its error is what the call
+fails with - except a C<-32022> whose list of supported versions holds only
+legacy revisions, of which the newest one this client speaks too is then
+asked for with C<initialize>;
+
+=item * any other error, or no answer within L</discover_timeout> on a stdio
+server, means the server is legacy, and the C<initialize> handshake follows
+with the newest legacy revision. Should that fail as well, the failure names
+what happened to both.
+
+=back
+
+A probe the subprocess of a stdio server did not live through is no answer
+from a legacy server, and fails with the exit instead of falling back. A
+probe answer that arrives after the fallback has begun is dropped.
+
+Returns the raw result hashref of the handshake: C<capabilities> plus C<_meta>
+containing C<io.modelcontextprotocol/serverInfo> for a modern server, the
+C<InitializeResult> for a legacy one. Also populates L</server_info>,
+L</server_capabilities>, L</instructions>, L</protocol_version> and
+L</is_legacy>.
 
 =cut
+
+# Private: the era a pinned protocol_version asks for, or nothing for a client
+# that pinned none.
+sub _pinned_era {
+  my ( $self ) = @_;
+  return unless $self->{protocol_version_pinned};
+  my $version = $self->{protocol_version};
+  return ( grep { $_ eq $version } @LEGACY_PROTOCOL_VERSIONS ) ? 'legacy' : 'modern';
+}
+
+# Private: the modern handshake, a server/discover and nothing else.
+async sub _modern_handshake {
+  my ( $self ) = @_;
+  my $result = await $self->_request('server/discover');
+  return $self->_modern_result($result);
+}
+
+# Private: what a DiscoverResult tells about the server, kept on the client.
+sub _modern_result {
+  my ( $self, $result ) = @_;
+  $self->{era} = 'modern';
+
+  # Read without autovivifying an _meta key into the result we hand back.
+  my $meta = $result->{_meta} // {};
+  $self->{server_info} = $meta->{'io.modelcontextprotocol/serverInfo'} // {};
+  $self->{server_capabilities} = $result->{capabilities} // {};
+  $self->{instructions} = $result->{instructions};
+
+  return $result;
+}
+
+# Private: the handshake of a client that speaks both eras and was not told
+# which one the server speaks - see initialize for the three outcomes.
+async sub _probe_handshake {
+  my ( $self ) = @_;
+
+  my $probe = $self->_request('server/discover');
+
+  # Only a stdio server may answer an unknown request with nothing at all;
+  # over HTTP every request is answered with a status, and in process on the
+  # spot. Losing the race cancels the probe, which drops it from the
+  # transport, so an answer that still arrives finds nothing to settle.
+  my $timeout = $self->{transport}->isa('Net::Async::MCP::Transport::Stdio')
+    ? $self->discover_timeout : 0;
+  if ($timeout) {
+    $probe = Future->wait_any(
+      $probe,
+      $self->loop->delay_future(after => $timeout)->then(sub {
+        Future->fail("server/discover got no answer within ${timeout}s",
+          'mcp_probe_timeout');
+      }),
+    );
+  }
+
+  my $answered = await $probe->followed_by(sub { Future->done( $_[0] ) });
+  return $self->_modern_result($answered->get) if $answered->is_done;
+
+  my ( $why, $category, $error ) = $answered->failure;
+  $category //= '';
+  my $code = $category eq 'mcp' && ref $error eq 'HASH' ? $error->{code} : undef;
+
+  # A modern server that turned the request down. Falling back to initialize
+  # is what the specification rules out here - unless the versions it offers
+  # instead are all legacy ones, and taking one of them up is doing what it
+  # asks.
+  if (defined $code && $MODERN_ERROR_CODES{$code}) {
+    my $version = $code == $UNSUPPORTED_PROTOCOL_VERSION
+      ? $self->_legacy_offer($error) : undef;
+    return await $answered unless defined $version;
+    return await $self->_legacy_handshake($version);
+  }
+
+  # A failure the server did not send - its process gone, above all - is no
+  # sign of a legacy server, and an initialize sent after it would only fail
+  # with a less telling message.
+  return await $answered
+    unless $category eq 'mcp' || $category eq 'mcp_probe_timeout'
+    || $self->{transport}->is_alive;
+
+  my $fallback = await $self->_legacy_handshake($LEGACY_PROTOCOL_VERSIONS[0])
+    ->followed_by(sub { Future->done( $_[0] ) });
+  return $fallback->get if $fallback->is_done;
+
+  # A server that refused both handshakes speaks neither era, and only both
+  # refusals together say so. Anything else - an unspoken version, a process
+  # that died - is told best by its own message.
+  my ( $failure, $fallback_category, @details ) = $fallback->failure;
+  return await $fallback unless ( $fallback_category // '' ) eq 'mcp';
+  return await Future->fail("MCP handshake failed: server/discover ($why) and "
+    . "initialize ($failure) were both refused", $fallback_category, @details);
+}
+
+# Private: the legacy revision to take up from a -32022 that lists no modern
+# revision this client speaks - the newest legacy one both sides speak - or
+# nothing.
+sub _legacy_offer {
+  my ( $self, $error ) = @_;
+  my $supported = ref $error->{data} eq 'HASH' ? $error->{data}{supported} : undef;
+  return unless ref $supported eq 'ARRAY';
+
+  my %offered = map { $_ => 1 } grep { defined && !ref } @$supported;
+  for my $version (@LEGACY_PROTOCOL_VERSIONS) {
+    return $version if $offered{$version};
+  }
+  return;
+}
+
+# Private: the legacy handshake, asking for $version: initialize, its answer
+# checked and kept, then notifications/initialized.
+async sub _legacy_handshake {
+  my ( $self, $version ) = @_;
+
+  # Set before the request goes out rather than once it is answered: the
+  # initialize is a legacy request itself, with no protocol keys in _meta, and
+  # a server may ping its client before it answers.
+  $self->{era} = 'legacy';
+
+  my $answered = await $self->_request('initialize', {
+    protocolVersion => $version,
+    capabilities    => {},
+    clientInfo      => $self->_client_info,
+  })->followed_by(sub { Future->done( $_[0] ) });
+
+  unless ( $answered->is_done ) {
+    delete $self->{era};
+    return await $answered;
+  }
+
+  my $result = $answered->get;
+  my $agreed = ref $result eq 'HASH' ? $result->{protocolVersion} : undef;
+
+  # The specification leaves a client that does not speak the answered
+  # revision one thing to do, which is to stop. The transport is left alone
+  # for the caller to shut down.
+  unless ( defined $agreed && !ref $agreed
+    && grep { $_ eq $agreed } @LEGACY_PROTOCOL_VERSIONS ) {
+    delete $self->{era};
+    croak "MCP server answered initialize with protocol version '"
+      . ( $agreed // '(none)' ) . "', which this client does not speak (it "
+      . "speaks " . join(', ', @LEGACY_PROTOCOL_VERSIONS) . " over initialize)";
+  }
+
+  $self->{protocol_version}    = $agreed;
+  $self->{server_info}         = $result->{serverInfo} // {};
+  $self->{server_capabilities} = $result->{capabilities} // {};
+  $self->{instructions}        = $result->{instructions};
+
+  await $self->{transport}->send_notification('notifications/initialized');
+
+  return $result;
+}
 
 # Private: how many pages a list method walks before giving up. Only a cursor
 # that comes round again proves a server is looping; one that keeps changing
@@ -1110,6 +1478,14 @@ my $SUBSCRIPTION_ACKNOWLEDGED = 'notifications/subscriptions/acknowledged';
 
 async sub subscriptions_listen {
   my ( $self, $notifications ) = @_;
+
+  # A legacy server sends its list_changed notifications without being asked,
+  # and has no subscriptions/listen to ask for them with.
+  croak "MCP subscriptions/listen needs protocol revision "
+    . "$DEFAULT_PROTOCOL_VERSION; this server speaks legacy revision "
+    . "$self->{protocol_version}, which has no subscriptions"
+    if $self->is_legacy;
+
   my $result = await $self->_request('subscriptions/listen',
     { notifications => $notifications // {} },
     resolve_on_notification => $SUBSCRIPTION_ACKNOWLEDGED);
@@ -1154,6 +1530,10 @@ over stdio too, answering with a C<notifications/subscriptions/acknowledged>
 notification where HTTP would answer with a response, and a transport that
 cannot settle a request from a notification says so rather than wait for an
 answer that will not come.
+
+Subscriptions are the modern revision's. On a legacy connection - see
+L</is_legacy> - this fails without sending anything: a legacy server sends its
+notifications unasked and has no C<subscriptions/listen> to answer.
 
 =cut
 
@@ -1236,8 +1616,10 @@ async sub shutdown {
 
     await $mcp->shutdown;
 
-Cleanly shuts down the MCP connection. For the Stdio transport this sends
-SIGTERM to the subprocess and waits for it to exit. For the HTTP transport it
+Cleanly shuts down the MCP connection. For the Stdio transport this closes the
+subprocess's stdin, sends SIGTERM if it is still running 2 seconds later and
+SIGKILL 2 seconds after that, and waits for it to exit - see
+L<Net::Async::MCP::Transport::Stdio/close>. For the HTTP transport it
 ends every subscription still running, that being the one thing it holds which
 outlives the request that opened it, and sends nothing. For the InProcess
 transport it is a no-op: a direct call and its return value leave nothing

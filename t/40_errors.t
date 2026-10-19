@@ -139,8 +139,8 @@ my $PROTOCOL_MESSAGE = 'MCP error -32602: Unsupported protocol version';
 
   # A dead subprocess is this transport's own failure, not the server's.
   my @failure = $transport->send_request('ping')->failure;
-  is($failure[0], 'MCP server process has exited',
-    'a transport-level failure keeps its message');
+  is($failure[0], 'MCP server process exited (code 0)',
+    'a transport-level failure says how the process ended');
   is(scalar @failure, 1, 'and carries no category');
 
   $loop->remove($transport);
