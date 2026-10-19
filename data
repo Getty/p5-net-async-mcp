@@ -1,0 +1,18 @@
+---
+class: standard
+completed: 2026-10-19T01:09:08Z
+created: 2026-10-19T01:07:06Z
+id: 33
+priority: high
+started: 2026-10-19T01:09:08Z
+status: done
+tags:
+- tests
+- deps
+title: Tests brauchen JSON::MaybeXS 1.004 (true/false), cpanfile verlangt keine Version
+updated: 2026-10-19T01:09:41Z
+---
+
+t/30_http.t ruft JSON::MaybeXS::false; die Subs gibt es erst ab JSON::MaybeXS 1.004000 (2018). cpanfile verlangt JSON::MaybeXS ohne Version, auf dem SunRiser-Update-Server (perl 5.20.1, JSON::MaybeXS 1.003002) bricht t/30_http.t deshalb beim Kompilieren ab und cpanm installiert 0.005 nicht. Fertig: Testphase verlangt JSON::MaybeXS 1.004.
+
+2026-10-19 01:09 Erledigt in daef289; t/ grün lokal (perl 5.40) und auf dem SunRiser-Update-Server (perl 5.20.1).
