@@ -299,7 +299,8 @@ sub _ensure_transport {
       unless $self->loop;
     require Net::Async::MCP::Transport::HTTP;
     $self->_build_transport('Net::Async::MCP::Transport::HTTP',
-      url => $self->{url});
+      url        => $self->{url},
+      on_request => $self->_server_request_handler);
   }
   else {
     croak "Must provide server, command, or url";
@@ -327,8 +328,8 @@ sub _build_transport {
   return $transport;
 }
 
-# Private: the handler the Stdio transport hands the requests a server sends
-# to the client. Only a legacy server sends any: the modern revision has no
+# Private: the handler the wire transports hand the requests a server sends
+# to the client - off stdout over stdio, off a response stream over HTTP. Only a legacy server sends any: the modern revision has no
 # server-to-client requests - a server asks through input_required results
 # instead - so on a modern connection they stay unanswered, as they always
 # were. A legacy server gets an empty result for ping, which every revision
@@ -413,6 +414,17 @@ travels as it is), the C<input_required> round trip and the renegotiation of a
 refused protocol version are modern-only and do not happen,
 L</subscriptions_listen> fails, and a C<ping> the server sends is answered
 while every other request it sends is refused with C<-32601>.
+
+Over HTTP a legacy connection is a session: see
+L<Net::Async::MCP::Transport::HTTP/Legacy sessions> for the headers it
+carries. A server may end the session at any time, which it says by answering
+C<404>; the request that ran into it is then sent once more in a new session,
+started with a new C<initialize> and C<notifications/initialized> as the
+specification asks. Requests that run into the same ended session share one
+new session, and requests made while it is being started wait for it. A
+request whose new session the server ends straight away as well fails with
+C<MCP METHOD: the server ended the new session as well (...)> in category
+C<mcp_session_expired>.
 
 =cut
 
@@ -806,8 +818,16 @@ sub _renegotiated_version {
 async sub _request {
   my ( $self, $method, $params, %options ) = @_;
 
-  my ( %retry, $rounds, $renegotiated );
+  my ( %retry, $rounds, $renegotiated, $renewed );
   while ( 1 ) {
+    # A request made while a new legacy session is being started waits for
+    # it, rather than going out in no session at all - all but the initialize
+    # that starts it. Without cancel, so that a caller giving up on its own
+    # request does not take the session from everybody else waiting on it.
+    if ( ( my $renewal = $self->{session_renewal} ) && !$options{start_session} ) {
+      await $renewal->without_cancel;
+    }
+
     # Awaited as a completed Future rather than for its value: a failure has
     # more to it than its message, and the server's error object - which is
     # where a refused version names the ones it would accept instead - travels
@@ -815,6 +835,19 @@ async sub _request {
     my $answered = await $self->{transport}->send_request($method,
       $self->_with_meta({ %{ $params // {} }, %retry }), %options)
       ->followed_by(sub { Future->done( $_[0] ) });
+
+    my ( $why, $category, $expired ) = $answered->is_failed ? $answered->failure : ();
+    if ( ( $category // '' ) eq 'mcp_session_expired' && $self->is_legacy ) {
+      # The server ended the session. The specification has the client start
+      # a new one and nothing else, and the request goes out again in it -
+      # once: a server that ends the new session as well is not one more
+      # session away from answering.
+      return await Future->fail("MCP $method: the server ended the new "
+        . "session as well ($why)", $category, $expired)
+        if $renewed++;
+      await $self->_renew_session($expired)->without_cancel;
+      next;
+    }
 
     if ( $answered->is_failed ) {
       # Renegotiation is the modern revision's: a legacy server agreed on its
@@ -1023,9 +1056,14 @@ what happened to both.
 
 =back
 
-A probe the subprocess of a stdio server did not live through is no answer
-from a legacy server, and fails with the exit instead of falling back. A
-probe answer that arrives after the fallback has begun is dropped.
+Over HTTP an answer is anything the server sent back: a JSON-RPC error in the
+body, whatever the status, is read as above - a C<400> carrying C<-32022> is a
+modern server - and a status without one, the C<400> or C<404> a legacy server
+answers a request before C<initialize> with, means legacy. What is not an
+answer does not fall back: a probe the subprocess of a stdio server did not
+live through fails with the exit, and one over a connection that could not be
+made - refused, an unknown host, a timeout - fails with that. A probe answer
+that arrives after the fallback has begun is dropped.
 
 Returns the raw result hashref of the handshake: C<capabilities> plus C<_meta>
 containing C<io.modelcontextprotocol/serverInfo> for a modern server, the
@@ -1106,12 +1144,18 @@ async sub _probe_handshake {
     return await $self->_legacy_handshake($version);
   }
 
-  # A failure the server did not send - its process gone, above all - is no
-  # sign of a legacy server, and an initialize sent after it would only fail
-  # with a less telling message.
+  # A failure the server did not send is no sign of a legacy server, and an
+  # initialize sent after it would only fail with a less telling message. Over
+  # stdio that is a process gone; over HTTP a connection that could not be
+  # made or broke off, which the HTTP transport reports in a category of its
+  # own (connect, http, timeout, ...). What is left
+  # is an answer: a JSON-RPC error, a probe that got none in time, and an HTTP
+  # status with no JSON-RPC error in its body, which the HTTP transport reports
+  # without a category - the 400 or 404 a legacy server answers a request it
+  # does not know before initialize with, above all.
   return await $answered
     unless $category eq 'mcp' || $category eq 'mcp_probe_timeout'
-    || $self->{transport}->is_alive;
+    || ( $category eq '' && $self->{transport}->is_alive );
 
   my $fallback = await $self->_legacy_handshake($LEGACY_PROTOCOL_VERSIONS[0])
     ->followed_by(sub { Future->done( $_[0] ) });
@@ -1142,23 +1186,28 @@ sub _legacy_offer {
 }
 
 # Private: the legacy handshake, asking for $version: initialize, its answer
-# checked and kept, then notifications/initialized.
+# checked and kept, then notifications/initialized. With renewal set it starts
+# a new session of a connection already legacy, and a failure leaves the era
+# as it is.
 async sub _legacy_handshake {
-  my ( $self, $version ) = @_;
+  my ( $self, $version, %args ) = @_;
+  my $transport = $self->{transport};
 
   # Set before the request goes out rather than once it is answered: the
   # initialize is a legacy request itself, with no protocol keys in _meta, and
-  # a server may ping its client before it answers.
+  # a server may ping its client before it answers. The transport switches
+  # with it, to a binding where a session is opened by this very request.
   $self->{era} = 'legacy';
+  $transport->start_legacy_session if $transport->can('start_legacy_session');
 
   my $answered = await $self->_request('initialize', {
     protocolVersion => $version,
     capabilities    => {},
     clientInfo      => $self->_client_info,
-  })->followed_by(sub { Future->done( $_[0] ) });
+  }, start_session => 1)->followed_by(sub { Future->done( $_[0] ) });
 
   unless ( $answered->is_done ) {
-    delete $self->{era};
+    $self->_abandon_legacy unless $args{renewal};
     return await $answered;
   }
 
@@ -1170,7 +1219,7 @@ async sub _legacy_handshake {
   # for the caller to shut down.
   unless ( defined $agreed && !ref $agreed
     && grep { $_ eq $agreed } @LEGACY_PROTOCOL_VERSIONS ) {
-    delete $self->{era};
+    $self->_abandon_legacy unless $args{renewal};
     croak "MCP server answered initialize with protocol version '"
       . ( $agreed // '(none)' ) . "', which this client does not speak (it "
       . "speaks " . join(', ', @LEGACY_PROTOCOL_VERSIONS) . " over initialize)";
@@ -1181,9 +1230,50 @@ async sub _legacy_handshake {
   $self->{server_capabilities} = $result->{capabilities} // {};
   $self->{instructions}        = $result->{instructions};
 
-  await $self->{transport}->send_notification('notifications/initialized');
+  # Before the notification rather than after it: everything after the
+  # initialize answer carries the agreed revision, notifications/initialized
+  # included.
+  $transport->set_legacy_protocol_version($agreed)
+    if $transport->can('set_legacy_protocol_version');
+
+  await $transport->send_notification('notifications/initialized');
 
   return $result;
+}
+
+# Private: back out of a legacy handshake that did not come off, on the client
+# and on a transport that switched binding for it.
+sub _abandon_legacy {
+  my ( $self ) = @_;
+  delete $self->{era};
+  my $transport = $self->{transport};
+  $transport->end_legacy_session if $transport->can('end_legacy_session');
+  return;
+}
+
+# Private: a Future for a new legacy session, after a request that went out in
+# $expired was answered with the end of that session. Shared by every request
+# that needs it, so requests that all ran into the same expired session start
+# one new session between them rather than one each; and one that ran into a
+# session already replaced needs no new session at all, only to be sent again.
+sub _renew_session {
+  my ( $self, $expired ) = @_;
+  return $self->{session_renewal} if $self->{session_renewal};
+
+  my $transport = $self->{transport};
+  my $current   = $transport->can('session_id') ? $transport->session_id : undef;
+  return Future->done if defined $current && $current ne $expired;
+
+  my $renewal = $self->_legacy_handshake($self->{protocol_version}, renewal => 1);
+  $self->{session_renewal} = $renewal;
+
+  weaken( my $weak_self = $self );
+  $renewal->on_ready(sub {
+    my $self = $weak_self or return;
+    delete $self->{session_renewal};
+  });
+
+  return $renewal;
 }
 
 # Private: how many pages a list method walks before giving up. Only a cursor
@@ -1621,7 +1711,10 @@ subprocess's stdin, sends SIGTERM if it is still running 2 seconds later and
 SIGKILL 2 seconds after that, and waits for it to exit - see
 L<Net::Async::MCP::Transport::Stdio/close>. For the HTTP transport it
 ends every subscription still running, that being the one thing it holds which
-outlives the request that opened it, and sends nothing. For the InProcess
+outlives the request that opened it, and on a legacy connection with a session
+sends the C<DELETE> that ends the session; a refusal of it other than C<405>
+or C<404> fails the returned L<Future> - see
+L<Net::Async::MCP::Transport::HTTP/close>. For the InProcess
 transport it is a no-op: a direct call and its return value leave nothing
 behind.
 

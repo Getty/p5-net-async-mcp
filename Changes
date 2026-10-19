@@ -18,6 +18,21 @@
     with "MCP server failed to start: cannot run PROGRAM: REASON".
   - The stdio transport closes stdin first on shutdown, then sends SIGTERM
     after 2 seconds and SIGKILL 2 seconds later.
+  - The HTTP transport speaks the legacy Streamable HTTP binding too: it keeps
+    the Mcp-Session-Id of the initialize answer and sends it with the agreed
+    MCP-Protocol-Version on every later POST, sends no Mcp-Method, Mcp-Name or
+    Mcp-Param headers, answers server requests on response streams, cancels
+    with notifications/cancelled and ends the session with a DELETE on
+    shutdown (405 and 404 count as ended).
+  - A 404 to a request in a legacy HTTP session starts a new session and sends
+    the request once more; concurrent requests share the new session, and a
+    second 404 fails the request in category mcp_session_expired.
+  - Over HTTP the probe falls back to initialize on a status without a
+    JSON-RPC error body as well, but not on a connection that could not be
+    made: those failures now carry a category (connect where Net::Async::HTTP
+    gave none).
+  - Configured headers can no longer set Mcp-Session-Id, MCP-Protocol-Version,
+    Mcp-Method, Mcp-Name or Mcp-Param-* on any request.
 
 0.006     2026-10-19 02:08:03Z
   - The test phase requires JSON::MaybeXS 1.004 now. t/30_http.t spells JSON
