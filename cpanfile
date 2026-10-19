@@ -9,5 +9,7 @@ recommends 'HTTP::Message';
 
 on test => sub {
   requires 'Test2::V0';
+  # the tests spell JSON booleans as JSON::MaybeXS::true/false, which are 1.004+
+  requires 'JSON::MaybeXS', '>= 1.004';
   requires 'MCP', '>= 0.15';
 };

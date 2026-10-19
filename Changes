@@ -1,4 +1,8 @@
 {{$NEXT}}
+  - The test phase requires JSON::MaybeXS 1.004 now. t/30_http.t spells JSON
+    booleans as JSON::MaybeXS::false, which only exists since 1.004000, and
+    with an older one installed the file died at compile time - which was all
+    that kept 0.005 from installing on perl 5.20 (k33)
 
 0.005     2026-10-18 23:49:38Z
   - Fixed the test suite dying instead of testing wherever MCP is not
