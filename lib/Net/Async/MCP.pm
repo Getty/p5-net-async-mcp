@@ -91,6 +91,13 @@ speaks (see L</protocol_version>; the legacy C<initialize> request no longer
 exists in it), carrying the client's protocol version, capabilities, and info
 in C<_meta>.
 
+Cancelling the L<Future> of a request cancels the request itself - the
+transport drops it and, over Stdio, tells the server - on perl 5.24 and later.
+On older perls L<Future::AsyncAwait> does not hand a cancel on to the future an
+C<async sub> is waiting on: the caller's future is cancelled, but the request
+stays pending in the transport until its answer, its timeout or the end of the
+connection.
+
 =cut
 
 # The protocol revisions this client speaks, newest first: the first of them is

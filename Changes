@@ -3,6 +3,11 @@
     booleans as JSON::MaybeXS::false, which only exists since 1.004000, and
     with an older one installed the file died at compile time - which was all
     that kept 0.005 from installing on perl 5.20 (k33)
+  - t/15_client.t no longer fails on perls before 5.24. Future::AsyncAwait
+    passes a cancel of an async sub's future on to the future it awaits only
+    on 5.24 and later, so there a cancelled request stays pending in the
+    transport; the two checks for that are skipped on older perls, and the
+    documentation says so (k34)
 
 0.005     2026-10-18 23:49:38Z
   - Fixed the test suite dying instead of testing wherever MCP is not
