@@ -1,4 +1,4 @@
-{{$NEXT}}
+0.006     2026-10-19 02:08:03Z
   - The test phase requires JSON::MaybeXS 1.004 now. t/30_http.t spells JSON
     booleans as JSON::MaybeXS::false, which only exists since 1.004000, and
     with an older one installed the file died at compile time - which was all
