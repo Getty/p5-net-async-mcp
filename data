@@ -1,0 +1,17 @@
+---
+class: standard
+completed: 2026-10-19T01:09:21Z
+created: 2026-10-19T01:07:11Z
+id: 34
+priority: high
+started: 2026-10-19T01:09:21Z
+status: done
+tags:
+- tests
+title: 't/15_client.t: Cancel-Weitergabe zum Transport geht erst ab perl 5.24'
+updated: 2026-10-19T01:09:46Z
+---
+
+Tests 88-89 (cancelling the client future drops the transport pending entry / fires on_cancel) scheitern auf perl 5.20.1. Ursache: Future::AsyncAwait reicht ->cancel des async-sub-Futures nur auf perl 5.24+ an den erwarteten Future weiter (Changes 0.24, HAVE_FUTURE_CHAIN_CANCEL im XS). Fertig: die beiden Prüfungen laufen nur ab 5.24, die Doku von Net::Async::MCP sagt, dass Abbrechen den Transport erst ab perl 5.24 erreicht.
+
+2026-10-19 01:09 Erledigt in e32de18; t/ grün lokal (perl 5.40) und auf dem SunRiser-Update-Server (perl 5.20.1).
