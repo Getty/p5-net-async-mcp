@@ -8,6 +8,9 @@
     on 5.24 and later, so there a cancelled request stays pending in the
     transport; the two checks for that are skipped on older perls, and the
     documentation says so (k34)
+  - The test phase declares Mojolicious 9.41. The stdio test server
+    t/bin/test_mcp_server.pl is a Mojo::Base script, and Mojolicious only came
+    along with MCP instead of being required where it is used (k35)
 
 0.005     2026-10-18 23:49:38Z
   - Fixed the test suite dying instead of testing wherever MCP is not
