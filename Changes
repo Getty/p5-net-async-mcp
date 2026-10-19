@@ -17,7 +17,9 @@
     last 20 stderr lines. A command that cannot be run fails the first request
     with "MCP server failed to start: cannot run PROGRAM: REASON".
   - The stdio transport closes stdin first on shutdown, then sends SIGTERM
-    after 2 seconds and SIGKILL 2 seconds later.
+    after 2 seconds and SIGKILL 2 seconds later. A server that exits when its
+    stdin closes gets no signal at all; one that does not is signalled only
+    after 2 seconds, so shutdown can take up to 4 seconds.
   - The HTTP transport speaks the legacy Streamable HTTP binding too: it keeps
     the Mcp-Session-Id of the initialize answer and sends it with the agreed
     MCP-Protocol-Version on every later POST, sends no Mcp-Method, Mcp-Name or
