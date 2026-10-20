@@ -1,0 +1,39 @@
+---
+claimed_at: 2026-10-20T20:16:32Z
+claimed_by: k36
+class: standard
+completed: 2026-10-20T20:16:32Z
+created: 2026-10-19T13:29:05Z
+id: 36
+priority: high
+started: 2026-10-19T13:30:04Z
+status: done
+title: 'Reach today''s MCP servers: initialize handshake and version negotiation,
+  Mcp-Session-Id, stdio env/cwd/stderr'
+updated: 2026-10-20T20:16:32Z
+---
+
+Fund aus langertha-raider #164 (2026-10-19, ADR 0029 §10 dort): Net::Async::MCP 0.006 spricht nur Protokoll 2026-07-28 (server/discover ohne initialize-Fallback), kennt kein Mcp-Session-Id (streamable HTTP), Stdio ohne env/cwd/stderr-Behandlung — damit erreicht es keinen heutigen Fremdserver. raider hat deshalb eigene MCP::Stdio/HTTP. Nötig: initialize mit Versionsaushandlung (aktuelle + ältere Spezifikationsversionen), Mcp-Session-Id, notifications/initialized, Stdio-Transport mit env/cwd/stderr, Tests gegen einen Testserver; danach kann raider zurückwechseln.
+
+2026-10-19 13:32 Entwurf (k36, nach Spezifikation 2026-07-28 Versioning/Backward Compatibility + stdio/HTTP-Bindings):
+1. Dual-Era-Client. Ohne gepinnte Version: Probe server/discover mit 2026-07-28. DiscoverResult -> modern. Erkannter moderner Fehler (-32020/-32021/-32022) -> moderne Neuverhandlung, KEIN Fallback. Jeder andere Fehler, stdio-Probe-Timeout, HTTP-4xx ohne modernen Fehler-Body -> Legacy-initialize.
+2. Legacy-Revisionen: 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05. initialize mit der neuesten (oder der gepinnten), Antwort muss in der Liste sein, sonst klarer Fehler mit beiden Listen. Danach notifications/initialized.
+3. protocol_version-Pin: Legacy-Version -> direkt initialize ohne Probe; 2026-07-28 -> nur modern (strikt, kein Fallback).
+4. Legacy auf dem Draht: kein io.modelcontextprotocol/*-_meta, keine Mcp-Method/Mcp-Name/Mcp-Param-Header; MCP-Protocol-Version = ausgehandelte Version.
+5. HTTP-Legacy: Mcp-Session-Id aus der initialize-Antwort auf allen Folgeanfragen; 404 mit Session -> einmal neu initialisieren und wiederholen (Spec MUST); DELETE beim close (405 ok); Server-Requests im SSE-Strom: ping -> {}, sonst -32601. Kein GET-Strom, kein Resume, kein altes HTTP+SSE (2024-11-05 nur ueber stdio) - Scope.
+6. Stdio: env (Overlay auf %ENV, undef loescht), cwd, stderr: on_stderr-Callback zeilenweise + letzte 20 Zeilen in Exit-Fehlermeldungen; nicht startbares Kommando -> klarer Fehler.
+7. Legacy-Modus: subscriptions_listen -> klarer Fehler (Scope); MRTR nur modern.
+Commits: pro Teilschritt durch net-async-mcp-release-manager (Hausregel) statt eigener WIP-Commits.
+
+2026-10-19 13:38 k36 worker: phase 1 started (protocol layer dual-era + stdio env/cwd/stderr/close order). Era set only by initialize; legacy pin selects the initialize handshake; probe timeout stdio-only.
+
+2026-10-19 14:05 k36 worker phase 1 done, tree commit-ready (uncommitted; new files t/25_legacy.t + t/bin/legacy_mcp_server.pl untracked, must be git-added or Git::GatherDir drops them). prove -lr t: 9 files 464 tests green. Drift for this board: (a) failures without a Future category (transport failures, client croaks) surface via await with a Carp location suffix - pre-existing; (b) Transport::InProcess cannot do the legacy handshake (MCP::Server::Context->new has no legacy flag) - pinning a legacy version on InProcess fails -32602; (c) legacy server requests (sampling/elicitation/roots) could later be routed to on_input_request; (d) loading EV (via Mojolicious/MCP::Server) after IO::Async watches children breaks SIGCHLD reaping - tests load MCP::Server first; (e) HTTP fallback refinement + Mcp-Session-Id is phase 2.
+
+2026-10-19 14:06 Phase 1 fertig (Dual-Era-Handshake + Stdio env/cwd/stderr, t/25_legacy.t + t/bin/legacy_mcp_server.pl; Suite 9 Dateien/464 Tests gruen). Commit durch release-manager. Weiter: Phase 2 HTTP (Mcp-Session-Id, MCP-Protocol-Version legacy, 4xx-Body-Fallback, DELETE, 404->Re-Init, Server-Requests im SSE). Folgepunkte aus Phase 1: InProcess kann keinen Legacy-Handshake (Pin -> -32602); EV-Laden nach IO::Async-Child-Watch stoert Reaping (Testhinweis); perl<5.24 Cancel erreicht Transport nicht (Probe-Timeout bleibt haengen bis spaete Antwort).
+
+2026-10-19 14:29 k36 worker phase 2 (HTTP legacy) done, tree commit-ready on top of 7790f5d; new untracked t/35_http_legacy.t + t/bin/legacy_http_server.pl must be git-added. prove -lr t: 10 files 532 tests green. Drift: net-async-mcp-core known-gaps list is stale (auth headers, notifications, HTTP coverage all exist now; dual-era not mentioned). NaHTTP 0.50 delivers a chunked body chunk only once its trailing CRLF arrived (Mojo write_chunk sends it late) - test server uses close-delimited bodies.
+
+2026-10-19 14:43 Abschluss k36. Branch k36-reach-todays-servers (vom lokalen main fdf4a34): 7790f5d (Legacy-initialize + stdio env/cwd/stderr), f13726f (Legacy Streamable HTTP: Mcp-Session-Id, MCP-Protocol-Version, 404->neue Session, DELETE), plus Changes-Klarstellung Shutdown. Suite: 10 Dateien, 532 Tests, PASS. Smoke gegen langertha-raider t/lib/mcp-test-server.pl: normal -> legacy 2025-11-25, --version 2025-03-26 ausgehandelt, env/cwd/stderr ok, exit -> Fehler mit Exitcode + stderr; MCP::Server bleibt modern.
+Abhaengige gegen Branch (Baseline main in Klammern): langertha-raider 207/1788 PASS (PASS); citiai-core 1 Fail t/18-queen-step.t #69 (identisch schon auf main, Langertha-Antwortparsing, nicht MCP); sunriser + sunriser_old: t/dev-mcp-smoke.t 3 Fails (main PASS) - Test prueft, dass der Server SIGTERM bekommt; neuer spezifikationsgemaesser Shutdown schliesst zuerst stdin, der Fixture-Server endet sauber mit Exit 0 ohne Signal. Gewollte Verhaltensaenderung, Test in sunriser muss "Server beendet" statt "SIGTERM erhalten" pruefen (Folgepunkt fuer sunriser-Board). hi-proto und raider existieren lokal nicht.
+Folgepunkte: (a) sunriser/sunriser_old t/dev-mcp-smoke.t anpassen; (b) Skill net-async-mcp-core veraltet: alle drei Known Gaps erledigt (headers, Notifications, HTTP-Tests), Dual-Era fehlt; Worker-Agent-Text "HTTP no coverage" veraltet; (c) InProcess kann keinen Legacy-Handshake; (d) Legacy-Sampling/Elicitation/Roots an on_input_request routen (spaeter); (e) Carp-Suffix " at ... line N" an manchen Fehlern (vorbestehend); (f) Modern-Server hinter Auth mit nacktem 401 faellt auf initialize zurueck und scheitert mit 401 (akzeptabel).
+raider-Umstellung (nur Notiz, ADR 0029 §10 Bedingungen 1-3 erfuellt sobald released): MCP::Stdio/MCP::HTTP und Handshake in MCP::Server durch Net::Async::MCP ersetzen (command+env+cwd+on_stderr, url+headers), Status/Prefix/Timeout-Schicht behalten; raider braucht weiterhin eigenes setsid/Prozessgruppen-Kill und CLAUDE_*-Env-Bereinigung (macht NAM nicht); dann t/254, t/255 und Szenarien gegen NAM laufen lassen.
