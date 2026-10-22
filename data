@@ -1,0 +1,27 @@
+---
+class: standard
+completed: 2026-10-22T01:46:42Z
+created: 2026-10-22T01:28:17Z
+id: 37
+priority: medium
+started: 2026-10-22T01:30:57Z
+status: done
+tags:
+- bug
+- inprocess
+title: 'InProcess: error->{code} ohne Formprüfung, gleiche Fehlerklasse wie k30'
+updated: 2026-10-22T01:46:42Z
+---
+
+## Befund
+
+`lib/Net/Async/MCP/Transport/InProcess.pm` (um Zeile 250) liest `error->{code}` ohne zu prüfen, ob `error` ein Hash ist. Gleiche Fehlerklasse wie k30 (Stdio). Gefunden vom Worker bei k30.
+
+## Fertig
+
+- InProcess liest Fehler über `Net::Async::MCP::JSONRPC` (`error_failure` / `error_text`) wie Stdio und HTTP.
+- Test mit String-/Array-/null-`error` eines eingebetteten Servers.
+
+2026-10-22 01:42 Worker (worktree k30-stdio-error-shape, not committed): InProcess _process_response now reads error through Net::Async::MCP::JSONRPC (_jsonrpc_class resolver, as Stdio/HTTP). JSON-RPC object -> (msg, mcp => err); any other defined error -> 'MCP in-process error response: TEXT', no category; error null alone -> 'MCP in-process invalid response: a null error and no result'; null next to result -> success. MCP::Server itself always sends {code,message}, so tested via stub server Test::ForeignErrorServer in t/40_errors.t. Red on HEAD: 18 assertions (string/number died at InProcess.pm:251, array/zero/no_code/null-alone wrong). Green now. Files: InProcess.pm (code+POD), JSONRPC.pm (ABSTRACT/DESCRIPTION name InProcess), t/40_errors.t (InProcess block), Changes (in-process entry). prove -lr -j3 t 590 PASS, dzil build + author/release PASS, langertha-raider MCP tests 27 files/197 PASS.
+
+2026-10-22 01:46 Koordinator (perl-developer-fb): geprüft und per Fast-Forward nach main (bis 4e392b5). Suite 590 PASS, raider-MCP-Tests 197 PASS, neue Tests gegen den alten Stand rot.
