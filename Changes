@@ -35,6 +35,10 @@
     gave none).
   - Configured headers can no longer set Mcp-Session-Id, MCP-Protocol-Version,
     Mcp-Method, Mcp-Name or Mcp-Param-* on any request.
+  - A stdio server answering with an "error" that is no JSON-RPC error object
+    (a string, number or array) fails the request with the text it carries
+    and no category, as over HTTP, instead of killing the event loop. A false
+    error and "error": null without a result fail the request too.
 
 0.006     2026-10-19 02:08:03Z
   - The test phase requires JSON::MaybeXS 1.004 now. t/30_http.t spells JSON

@@ -11,6 +11,8 @@ use Encode qw( encode is_utf8 );
 use MIME::Base64 qw( encode_base64 );
 use Scalar::Util qw( blessed weaken );
 
+use Net::Async::MCP::JSONRPC;
+
 =head1 SYNOPSIS
 
     # Usually created automatically by Net::Async::MCP
@@ -1377,28 +1379,16 @@ sub _jsonrpc_error_from_body {
   return $self->_jsonrpc_error_failure($data);
 }
 
+# Private: the class that reads the error of a response, named once.
+sub _jsonrpc_class { 'Net::Async::MCP::JSONRPC' }
+
 # The Future->fail arguments for a decoded body that carries a JSON-RPC error
-# object, and the empty list for anything else. Not every JSON error body is a
-# JSON-RPC one: an MCP server answers a bad method with
-# {error => 'Method not allowed'}, and a gateway in between may invent its own
-# shape, so the shape is checked before it is read as an object.
-#
-# The message alone cannot carry a code to switch on or an error->{data} to
-# read, so the raw error object travels with it as the details of a failure in
-# category "mcp". The message stays the first element, so a caller reading the
-# failure in scalar context sees exactly what it saw before.
+# object, and the empty list for anything else - see
+# Net::Async::MCP::JSONRPC, which the stdio transport reads its answers with
+# too.
 sub _jsonrpc_error_failure {
   my ( $self, $data ) = @_;
-
-  return () unless ref $data eq 'HASH';
-
-  my $err = $data->{error};
-  return () unless ref $err eq 'HASH' && defined $err->{code};
-
-  return (
-    "MCP error $err->{code}: " . ($err->{message} // '(no message)'),
-    mcp => $err,
-  );
+  return $self->_jsonrpc_class->error_failure($data);
 }
 
 # A body that says "error" in a shape this client cannot read as JSON-RPC still
@@ -1406,9 +1396,7 @@ sub _jsonrpc_error_failure {
 # holds rather than reaching into it as if it were an object.
 sub _foreign_error_message {
   my ( $self, $err ) = @_;
-
-  my $text = ref $err ? eval { $self->{json}->encode($err) } // 'unknown error' : $err;
-  return "MCP HTTP error response: $text";
+  return 'MCP HTTP error response: '.$self->_jsonrpc_class->error_text($err);
 }
 
 sub _handle_json_response {

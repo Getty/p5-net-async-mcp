@@ -146,6 +146,103 @@ my $PROTOCOL_MESSAGE = 'MCP error -32602: Unsupported protocol version';
   $loop->remove($transport);
 }
 
+# Stdio, a server that answers in shapes JSON-RPC does not have. The subprocess
+# is whatever the host was told to run, so what it writes is foreign input: an
+# "error" that is no error object must neither be reached into - which dies
+# inside the read callback, takes the loop down with it and leaves the request
+# pending forever - nor be read as success. Each request names the shape it
+# wants back as its method, so one subprocess serves every case, and the last
+# request proves the transport still answers after all of them.
+{
+  my $loop = IO::Async::Loop->new;
+
+  my $transport = Net::Async::MCP::Transport::Stdio->new(
+    command => [
+      $^X, '-MJSON::MaybeXS', '-e', q{
+        my $json = JSON::MaybeXS->new(utf8 => 1, canonical => 1);
+        my %answer = (
+          string         => { error => 'nope' },
+          array          => { error => [ 'nope', 1 ] },
+          number         => { error => 42 },
+          zero           => { error => 0 },
+          no_code        => { error => { message => 'nope' } },
+          null_alone     => { error => undef },
+          null_on_result => { error => undef, result => { ok => 1 } },
+          proper         => { result => { ok => 1 } },
+        );
+        $| = 1;
+        while (defined(my $line = <STDIN>)) {
+          chomp $line;
+          next if $line eq '';
+          my $message = $json->decode($line);
+          next unless defined $message->{id};
+          print $json->encode({
+            jsonrpc => '2.0',
+            id      => $message->{id},
+            %{ $answer{ $message->{method} } },
+          }), "\n";
+        }
+      },
+    ],
+  );
+  $loop->add($transport);
+
+  # The await sits in an eval so that a read callback dying in the loop shows
+  # up as a failed assertion here rather than as the end of the test file.
+  my $answer = sub {
+    my ( $shape ) = @_;
+    my $f = $transport->send_request($shape);
+    my $survived = eval { $f->await; 1 };
+    ok($survived, 'the loop survives an answer of shape '.$shape)
+      or diag $@;
+    return $f;
+  };
+
+  for my $case (
+    [ string  => 'MCP stdio error response: nope',              'a string error' ],
+    [ array   => 'MCP stdio error response: ["nope",1]',        'an array error' ],
+    [ number  => 'MCP stdio error response: 42',                'a number error' ],
+    [ zero    => 'MCP stdio error response: 0',                 'a false number error' ],
+    [ no_code => 'MCP stdio error response: {"message":"nope"}', 'an error object without a code' ],
+  ) {
+    my ( $shape, $message, $what ) = @$case;
+    my $f = $answer->($shape);
+    ok($f->is_failed, $what.' fails the request');
+    my @failure = $f->is_failed ? $f->failure : ();
+    is($failure[0], $message, $what.' fails with the text it carries');
+    is(scalar @failure, 1,
+      $what.' carries no category, having no error object to hand over');
+  }
+
+  # JSON-RPC 1.0 put "error": null next to every result, and some servers still
+  # do: alongside a result it says nothing. On its own it answers nothing, and
+  # reporting that as a success would hand the caller an undef it never asked
+  # for.
+  {
+    my $f = $answer->('null_alone');
+    ok($f->is_failed, 'a null error without a result fails the request');
+    my @failure = $f->is_failed ? $f->failure : ();
+    is($failure[0], 'MCP stdio invalid response: a null error and no result',
+      'saying what was missing');
+    is(scalar @failure, 1, 'and carries no category');
+  }
+
+  {
+    my $f = $answer->('null_on_result');
+    ok($f->is_done, 'a null error next to a result is a success');
+    is($f->is_done ? $f->result : undef, { ok => 1 }, 'with that result');
+  }
+
+  {
+    my $f = $answer->('proper');
+    ok($f->is_done, 'the transport still answers after every foreign shape');
+    is($f->is_done ? $f->result : undef, { ok => 1 }, 'with the result sent');
+  }
+
+  $transport->close->get;
+  $loop->remove($transport);
+}
+
 sub response {
   my ( $code, $content_type, $content ) = @_;
   return HTTP::Response->new($code, undef,

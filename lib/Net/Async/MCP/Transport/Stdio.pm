@@ -10,6 +10,8 @@ use Encode qw( decode );
 use Carp qw( croak );
 use Scalar::Util qw( weaken );
 
+use Net::Async::MCP::JSONRPC;
+
 =head1 SYNOPSIS
 
     # Usually created automatically by Net::Async::MCP
@@ -357,6 +359,14 @@ still pending when the transport leaves its loop - carry their message alone,
 so a caller that finds no category knows there is no server error object
 behind it.
 
+An C<error> that is no JSON-RPC error object - a string, a number, an array, a
+hash without a C<code> - still fails the request, with
+C<MCP stdio error response: TEXT> carrying the value or its JSON, and no
+category, since there is no error object to hand over. A C<"error": null> next
+to a C<result> is a success, as JSON-RPC 1.0 wrote it; without one it fails
+with C<MCP stdio invalid response: a null error and no result>. A server
+answering in a shape it should not never leaves the request waiting.
+
 Fails immediately if the subprocess has already exited. A request still
 pending when it exits fails with C<MCP server process exited (code N)> - or
 C<(signal N)> - followed by the last lines the subprocess wrote to its stderr,
@@ -585,16 +595,36 @@ sub _on_stdout_read {
     my $future = delete $self->{pending}{$id};
     next unless $future;
 
-    # The raw JSON-RPC error object travels with the message as the details of
-    # a failure in category "mcp", so a caller can read the code and any
-    # error->{data} the server sent instead of parsing the message for them.
-    if (my $err = $response->{error}) {
-      $future->fail("MCP error $err->{code}: $err->{message}", mcp => $err);
-    }
-    else {
-      $future->done($response->{result});
-    }
+    $self->_settle_response($future, $response);
   }
+}
+
+# Private: the class that reads the error of a response, named once.
+sub _jsonrpc_class { 'Net::Async::MCP::JSONRPC' }
+
+# Private: the answer to a request of ours, read without trusting its shape -
+# the subprocess is whatever the host was told to run. Every branch settles
+# the future, which has already left the pending table: one that died here
+# would take the loop down and leave the request waiting forever.
+sub _settle_response {
+  my ( $self, $future, $response ) = @_;
+
+  # The raw JSON-RPC error object travels with the message as the details of
+  # a failure in category "mcp", so a caller can read the code and any
+  # error->{data} the server sent instead of parsing the message for them. An
+  # error in any other shape - a string, a number, false - still says the
+  # request failed, with the text it carries and no category.
+  if (defined(my $err = $response->{error})) {
+    my @failure = $self->_jsonrpc_class->error_failure($response);
+    return $future->fail(@failure) if @failure;
+    return $future->fail('MCP stdio error response: '.$self->_jsonrpc_class->error_text($err));
+  }
+
+  # "error": null sits next to every result in JSON-RPC 1.0 and says nothing
+  # there. Without a result it answers nothing, and an undef handed out as the
+  # result would be a success the server never reported.
+  return $future->done($response->{result}) if exists $response->{result};
+  return $future->fail('MCP stdio invalid response: a null error and no result');
 }
 
 # Private: a request the server sent, answered with whatever on_request
