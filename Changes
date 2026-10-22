@@ -43,6 +43,10 @@
     the same way: a shape that is no JSON-RPC error object fails the request
     with "MCP in-process error response: TEXT" and no category instead of
     dying in the caller, and "error": null without a result fails it too.
+  - Behaviour change: over HTTP, "error": null without a result now fails the
+    request with "MCP HTTP invalid response: a null error and no result"
+    instead of succeeding with undef, as over stdio. Next to a result it is
+    still a success.
 
 0.006     2026-10-19 02:08:03Z
   - The test phase requires JSON::MaybeXS 1.004 now. t/30_http.t spells JSON

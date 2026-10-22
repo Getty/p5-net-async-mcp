@@ -405,6 +405,34 @@ subtest 'HTTP transport' => sub {
       'and carries no category, having no error object to hand over');
   }
 
+  # "error": null reads the same over HTTP as over stdio, in a JSON body and on
+  # an event stream alike: next to a result it is the JSON-RPC 1.0 habit and
+  # says nothing, on its own it answers nothing, and an undef handed out as
+  # the result would be a success the server never reported.
+  for my $case (
+    [ 'a JSON body',      'application/json',  sub { $_[0] } ],
+    [ 'an event stream',  'text/event-stream', sub { "data: $_[0]\n\n" } ],
+  ) {
+    my ( $where, $content_type, $wrap ) = @$case;
+
+    {
+      my $f = $transport->_handle_response(response(200, $content_type,
+        $wrap->('{"jsonrpc":"2.0","id":1,"error":null}')));
+      ok($f->is_failed, 'in '.$where.', a null error without a result fails the request');
+      my @failure = $f->is_failed ? $f->failure : ();
+      is($failure[0], 'MCP HTTP invalid response: a null error and no result',
+        'saying what was missing');
+      is(scalar @failure, 1, 'and carries no category');
+    }
+
+    {
+      my $f = $transport->_handle_response(response(200, $content_type,
+        $wrap->('{"jsonrpc":"2.0","id":1,"error":null,"result":{"ok":1}}')));
+      ok($f->is_done, 'in '.$where.', a null error next to a result is a success');
+      is($f->is_done ? $f->result : undef, { ok => 1 }, 'with that result');
+    }
+  }
+
   # A non-2xx whose body holds no JSON-RPC error must still fall back to the
   # status line. The lookup answers with a list now, and an empty body is where
   # an "undef" left over from the scalar days would become a one-element list

@@ -492,7 +492,10 @@ with the HTTP status line.
 An C<error> member that is not a JSON-RPC error object - a bare string, as
 L<MCP::Server>'s own HTTP transport renders its refusals, or whatever shape a
 gateway in between invents - fails the L<Future> as well, carrying the text the
-body held.
+body held. A C<"error": null> next to a C<result> is a success, as JSON-RPC 1.0
+wrote it; without one it fails with
+C<MCP HTTP invalid response: a null error and no result>, in a JSON body and
+on an event stream alike.
 
 A JSON-RPC error fails the L<Future> with more than its message, wherever in
 the body or the stream it was found. L<Future>'s failure convention is
@@ -1126,6 +1129,12 @@ sub _settle_response {
     return $outcome->fail($self->_foreign_error_message($err));
   }
 
+  # "error": null sits next to every result in JSON-RPC 1.0 and says nothing
+  # there. Without a result it answers nothing, and an undef handed out as the
+  # result would be a success the server never reported.
+  return $outcome->fail($self->_null_error_message)
+    if exists $data->{error} && !exists $data->{result};
+
   return $outcome->done($data->{result});
 }
 
@@ -1399,6 +1408,9 @@ sub _foreign_error_message {
   return 'MCP HTTP error response: '.$self->_jsonrpc_class->error_text($err);
 }
 
+# An "error": null with no result beside it, which answers nothing.
+sub _null_error_message { 'MCP HTTP invalid response: a null error and no result' }
+
 sub _handle_json_response {
   my ( $self, $body ) = @_;
 
@@ -1411,6 +1423,10 @@ sub _handle_json_response {
     return Future->fail(@failure) if @failure;
     return Future->fail($self->_foreign_error_message($err));
   }
+
+  # The null error of _settle_response, read the same in a whole JSON body.
+  return Future->fail($self->_null_error_message)
+    if exists $data->{error} && !exists $data->{result};
 
   return Future->done($data->{result});
 }
