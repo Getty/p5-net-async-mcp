@@ -16,6 +16,7 @@ and swaps the transport underneath. No `Moo` anywhere — do not introduce it.
 | `Transport::InProcess` | embeds an `MCP::Server` and calls it directly — the only transport with a server in-process |
 | `Transport::Stdio` | pure client: newline-delimited JSON-RPC over a subprocess's stdio |
 | `Transport::HTTP` | pure client: Streamable HTTP over `Net::Async::HTTP` |
+| `Net::Async::MCP::JSONRPC` | internal helper, no public API: `error_failure` and `error_text`, which all three transports read a response's `error` with |
 
 The constructor argument picks the transport: `server` → InProcess, `command` → Stdio, `url` → HTTP. Stdio and HTTP need the client in an `IO::Async::Loop` before the transport
 can be built; InProcess does not and is no notifier, so it has no place in the loop.
@@ -84,6 +85,10 @@ The `mcp` category marks a genuine JSON-RPC error and nothing else; the raw erro
 that is no server error carries no category — except `connect` for an HTTP connection that could not be made, `mcp_probe_timeout` for an unanswered stdio probe and `mcp_session_expired` for an
 ended legacy session.
 
+An `error` is read through `Net::Async::MCP::JSONRPC`, never reached into: only a hash with a defined `code` is a JSON-RPC error. Any other defined `error` — a string, a
+number, an array, a hash without `code` — fails without category as `MCP {stdio,HTTP,in-process} error response: TEXT`. `"error": null` next to a `result` is a success, alone it fails as
+`MCP … invalid response: a null error and no result`.
+
 ## Invariants to keep
 
 - **The version list is this distribution's own.** `@MODERN_PROTOCOL_VERSIONS` and `@LEGACY_PROTOCOL_VERSIONS` say what *this client builds*: an entry means the request shapes of that revision are built
@@ -95,7 +100,7 @@ ended legacy session.
 - **The tool-header cache serves only mirroring bindings.** `call_tool` resolves the `x-mcp-header` annotations from the tool's input schema; a transport that does not mirror
   headers never fetches a tool list for it.
 - **Weak references across the client/transport edge.** The client holds the transport, so the transport must not hold the client.
-- **Single `$VERSION`.** `dist.ini` has `version_finder = :MainModule`: `our $VERSION` lives only in `lib/Net/Async/MCP.pm`, the transport modules deliberately carry none. This diverges from the general `[@Author::GETTY]` convention (skill
+- **Single `$VERSION`.** `dist.ini` has `version_finder = :MainModule`: `our $VERSION` lives only in `lib/Net/Async/MCP.pm`, the transport modules and `JSONRPC` deliberately carry none. This diverges from the general `[@Author::GETTY]` convention (skill
   `getty-perl-release-author-getty`) and is intentional.
 
 ## Traps — what breaks silently
@@ -133,6 +138,7 @@ server).
 
 - `lib/Net/Async/MCP.pm` — the client: public API, `_request`, the handshake, the era.
 - `lib/Net/Async/MCP/Transport/{InProcess,Stdio,HTTP}.pm` — the three transports.
+- `lib/Net/Async/MCP/JSONRPC.pm` — how every transport reads the `error` of a response.
 - `t/10_inprocess.t`, `t/11_context.t` — a real `MCP::Server` in process; the context rule, both halves.
 - `t/15_client.t` — transport-independent client behaviour against stub servers.
 - `t/20_stdio.t` — a real `MCP::Server` in a subprocess; cancellation, stderr, shutdown.
