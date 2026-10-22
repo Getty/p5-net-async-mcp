@@ -1,0 +1,27 @@
+---
+class: standard
+completed: 2026-10-22T01:46:44Z
+created: 2026-10-22T01:28:22Z
+id: 38
+priority: low
+started: 2026-10-22T01:30:57Z
+status: done
+tags:
+- bug
+- http
+title: 'HTTP: "error": null ohne result wird als Erfolg mit undef gemeldet'
+updated: 2026-10-22T01:46:44Z
+---
+
+## Befund
+
+`Transport/HTTP.pm` `_settle_response` und `_handle_json_response` melden `{"error": null}` ohne `result` als Erfolg mit `undef`. Stdio schlägt seit k30 in diesem Fall fehl (`MCP stdio invalid response: a null error and no result`). Bei k30 absichtlich unverändert gelassen.
+
+## Fertig
+
+- HTTP verhält sich wie Stdio: null-error neben result = Erfolg, allein = Fehlschlag ohne Kategorie.
+- Test in t/30_http.t bzw. t/40_errors.t.
+
+2026-10-22 01:42 Worker (worktree k30-stdio-error-shape, not committed): HTTP _settle_response (SSE) and _handle_json_response (JSON body) fail error null without result with 'MCP HTTP invalid response: a null error and no result' (new _null_error_message), no category; error null next to result stays success. Behaviour change, named in Changes. Red on HEAD: 6 assertions in t/40_errors.t HTTP subtest (JSON body and event stream reported success). Green now. Files: HTTP.pm (code+POD in send_request), t/40_errors.t (HTTP null-error loop), Changes (Behaviour change entry). Suite results as on k37.
+
+2026-10-22 01:46 Koordinator (perl-developer-fb): geprüft und per Fast-Forward nach main (bis 4e392b5). Suite 590 PASS, raider-MCP-Tests 197 PASS, neue Tests gegen den alten Stand rot.
