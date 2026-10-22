@@ -1,0 +1,27 @@
+---
+block_reason: 'Release-abhaengig: GH#1/#2 erst nach maintainer-freigegebenem gemeinsamem
+  Release schliessbar; Fixes lokal fertig (GH#2=4ba67fe). Keine Push/Release/GitHub-Aktion
+  in dieser Runde.'
+blocked: true
+class: standard
+completed: 2026-10-22T13:41:18Z
+created: 2026-08-23T22:04:03Z
+id: 29
+priority: medium
+started: 2026-10-22T13:41:18Z
+status: done
+tags:
+- github
+title: 'Nach dem naechsten Release: GH #1 und #2 schliessen'
+updated: 2026-10-22T13:41:18Z
+---
+
+Beide Issues von eserte sind beantwortet, aber bewusst offen geblieben.
+
+GH #1 (has_scope on unblessed reference): Fix ist seit 0.003 draussen. Offen gelassen, damit eserte auf seinen Smokern gegenpruefen kann. Kann geschlossen werden, sobald ein Release mit dem GH-#2-Fix durch seine Smoker gelaufen ist -- vorher smoked er 0.004 nach und landet direkt in #2.
+
+GH #2 (MCP nicht installiert auf Smokern): Fix ist committet (4ba67fe), aber noch nicht released. Erst nach dem Release schliessen.
+
+Voraussetzung ist also ein Release, und das gibt es nur mit ausdruecklicher Freigabe des Maintainers. Dieses Ticket ist kein Auftrag zu releasen.
+
+Fleet-Runde Worker B, Review 2026-09-10: Beide Fixes lokal verifiziert vorhanden — GH#2 = 4ba67fe ('Restore the MCP test prereq, load the context at runtime'), GH#1-Fix seit 0.003 draussen. User-Entscheidung: als 'ready, wartet auf gemeinsames Release' vorbereiten, jetzt NICHT schliessen. Fleet-Leitplanken: KEIN Push/Release/GitHub-Write. Bleibt release-blockiert, bis der Maintainer ein Release freigibt.
