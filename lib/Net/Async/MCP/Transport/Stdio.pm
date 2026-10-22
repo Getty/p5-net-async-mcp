@@ -73,7 +73,7 @@ sub configure {
   if (exists $params{command}) {
     $self->{command} = delete $params{command};
   }
-  for my $key (qw( env cwd on_notification on_stderr on_request )) {
+  for my $key (qw( env cwd timeout on_notification on_stderr on_request )) {
     $self->{$key} = delete $params{$key} if exists $params{$key};
   }
   $self->SUPER::configure(%params);
@@ -101,6 +101,27 @@ not exist fails the start the same way a command that cannot be executed does
 Both C<env> and C<cwd> describe the process as it is started, which happens
 when the transport is added to a loop; configuring either afterwards changes
 nothing for a process that is already running.
+
+=attr timeout
+
+    my $transport = Net::Async::MCP::Transport::Stdio->new(
+        command => [ 'my-mcp-server' ],
+        timeout => 120,
+    );
+
+Optional. The limit in seconds on how long a request waits for its answer.
+Unset by default, and then a request waits for as long as the subprocess
+lives: an MCP C<tools/call> may legitimately run for minutes, and only a
+caller that knows its own upper bound can pick one. A request still
+unanswered when the limit runs out is cancelled - its pending entry dropped
+and C<notifications/cancelled> written to the subprocess, as
+L</send_request> describes for a cancel - and its L<Future> fails with
+C<MCP stdio request METHOD timed out after Ns> in category C<timeout>, the
+category L<Net::Async::HTTP> gives a timed out HTTP request.
+
+As in the HTTP transport, C<0> is a limit of zero seconds rather than "no
+limit": leave it undef to have none. The limit applies to every request sent
+after it is set, and each request keeps the one it was sent with.
 
 =attr on_stderr
 
@@ -319,7 +340,35 @@ sub send_request {
     return;
   });
 
+  # The loop holds the timer until it fires, and the request holds it to stop
+  # it the moment the request is settled any other way - answered, failed by
+  # the exit, cancelled - so a finished request leaves no timer behind. The
+  # timer holds the transport weakly, for the same reason as on_cancel above.
+  my $timeout = $self->{timeout};
+  if (defined $timeout) {
+    my $timer = $self->loop->delay_future(after => $timeout)->on_done(sub {
+      my $self = $weak_self or return;
+      $self->_time_out($id, $method, $timeout);
+    });
+    $future->on_ready(sub { $timer->cancel unless $timer->is_ready });
+  }
+
   return $future;
+}
+
+# Private: a request whose timeout ran out before its answer arrived. Cancelled
+# the way a caller's ->cancel cancels it - the entry dropped, so a late answer
+# lands on nothing, and the server told unless it is already going - but
+# failed rather than cancelled, so the caller learns why.
+sub _time_out {
+  my ( $self, $id, $method, $timeout ) = @_;
+  my $future = delete $self->{pending}{$id} or return;
+  $self->send_notification('notifications/cancelled', {
+    requestId => $id,
+    reason    => 'timed out after '.$timeout.'s',
+  }) unless $self->{closed};
+  $future->fail('MCP stdio request '.$method.' timed out after '.$timeout.'s', 'timeout');
+  return;
 }
 
 =method send_request
@@ -357,7 +406,8 @@ else. The failures this transport raises on its own - a request sent after the
 subprocess has exited, a request still pending when it does, and a request
 still pending when the transport leaves its loop - carry their message alone,
 so a caller that finds no category knows there is no server error object
-behind it.
+behind it. The one exception is a request that ran out of L</timeout>, which
+fails in category C<timeout>.
 
 An C<error> that is no JSON-RPC error object - a string, a number, an array, a
 hash without a C<code> - still fails the request, with
@@ -390,6 +440,10 @@ written to the subprocess stdin. No C<reason> is sent, since C<< ->cancel >>
 carries no argument to put there. Nothing is written if the future is already
 done or failed, or if the subprocess has exited: a cancellation never writes
 into a dead pipe.
+
+A request that runs into L</timeout> is cancelled the same way, with a
+C<reason> saying so, and its L<Future> fails in category C<timeout> rather
+than being cancelled.
 
 This is the stdio form of cancellation. On Streamable HTTP a request is
 cancelled by closing its response stream instead, so

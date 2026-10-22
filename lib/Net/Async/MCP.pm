@@ -169,17 +169,18 @@ my @CLIENT_KEYS = qw( server command url protocol_version client_capabilities
 # about it.
 #
 # Which transport takes what is one decision per key rather than one for the
-# lot. headers, timeout and stall_timeout describe an HTTP request, and handing
-# one to the Stdio transport is not a setting it ignores but an "Unrecognised
-# configuration keys" croak; on_notification is an event both wire transports
-# have. on_subscription_end has only the HTTP transport to go to, a stream
-# being the one thing a subscription can end on. The InProcess transport is no
+# lot. headers and stall_timeout describe an HTTP request, and handing one to
+# the Stdio transport is not a setting it ignores but an "Unrecognised
+# configuration keys" croak; timeout, the limit on waiting for an answer, and
+# on_notification, an event, are what both wire transports have.
+# on_subscription_end has only the HTTP transport to go to, a stream being the
+# one thing a subscription can end on. The InProcess transport is no
 # L<IO::Async::Notifier>, has no C<configure> and no events at all, so it
 # matches nothing here and is handed nothing. env, cwd and on_stderr describe
 # a subprocess, which only the Stdio transport has.
 my %TRANSPORT_KEYS = (
   headers               => 'Net::Async::MCP::Transport::HTTP',
-  timeout               => 'Net::Async::MCP::Transport::HTTP',
+  timeout               => 'IO::Async::Notifier',
   stall_timeout         => 'Net::Async::MCP::Transport::HTTP',
   on_notification       => 'IO::Async::Notifier',
   on_subscription_end   => 'Net::Async::MCP::Transport::HTTP',
@@ -454,6 +455,11 @@ pinned through L</protocol_version>, which skips the probe altogether.
 Only the stdio transport waits on it. Over HTTP every request is answered with
 a status, and the InProcess transport answers on the spot.
 
+A L</timeout> limits the probe as well, being a limit on every request, and
+over stdio its running out counts the same as this one: no answer, so the
+server is taken to be legacy. Whichever of the two is shorter decides, and a
+C<discover_timeout> of C<0> leaves the probe to L</timeout> alone.
+
 =cut
 
 sub instructions { $_[0]->{instructions} }
@@ -518,11 +524,25 @@ sub timeout { $_[0]->{timeout} }
     my $timeout = $mcp->timeout;
 
 Returns (or via C<configure>/constructor argument C<timeout> sets) the
-wall-clock limit in seconds on a single HTTP request. Unset by default, because
-an MCP C<tools/call> may legitimately run for minutes and a default would break
-such a setup; L</stall_timeout> is the one that guards against a hung server.
-Note that C<0> is a limit of zero seconds rather than "no limit". HTTP
-transport only.
+wall-clock limit in seconds on a single request. Unset by default, because an
+MCP C<tools/call> may legitimately run for minutes and a default would break
+such a setup. Note that C<0> is a limit of zero seconds rather than "no
+limit".
+
+Over HTTP it limits each request the transport sends, and a request that runs
+into it fails with C<Timed out> in category C<timeout>, as
+L<Net::Async::HTTP> fails it; L</stall_timeout> is the one there that guards
+against a hung server without a limit of this kind. Over stdio it is the only
+guard against a server that lives but never answers: without it such a request
+waits for as long as the subprocess runs. A stdio request that runs into it is
+cancelled - the server is sent C<notifications/cancelled> for it - and fails
+with C<MCP stdio request METHOD timed out after Ns>, in category C<timeout> as
+well, so one check serves both transports. See
+L<Net::Async::MCP::Transport::Stdio/timeout>.
+
+Either way the limit is per JSON-RPC request: a call that takes
+C<input_required> round trips or a renegotiated version sends several, and
+each of them gets the whole limit. The InProcess transport ignores it.
 
 =cut
 
@@ -1049,8 +1069,9 @@ fails with - except a C<-32022> whose list of supported versions holds only
 legacy revisions, of which the newest one this client speaks too is then
 asked for with C<initialize>;
 
-=item * any other error, or no answer within L</discover_timeout> on a stdio
-server, means the server is legacy, and the C<initialize> handshake follows
+=item * any other error, or no answer within L</discover_timeout> - or
+L</timeout>, where that is shorter - on a stdio server, means the server is
+legacy, and the C<initialize> handshake follows
 with the newest legacy revision. Should that fail as well, the failure names
 what happened to both.
 
@@ -1152,9 +1173,14 @@ async sub _probe_handshake {
   # is an answer: a JSON-RPC error, a probe that got none in time, and an HTTP
   # status with no JSON-RPC error in its body, which the HTTP transport reports
   # without a category - the 400 or 404 a legacy server answers a request it
-  # does not know before initialize with, above all.
+  # does not know before initialize with, above all. A stdio probe that ran
+  # out of the request timeout got no answer in time too, only within a
+  # shorter limit than discover_timeout - unlike an HTTP timeout, which is a
+  # connection that never delivered a status.
+  my $stdio_timeout = $category eq 'timeout'
+    && $self->{transport}->isa('Net::Async::MCP::Transport::Stdio');
   return await $answered
-    unless $category eq 'mcp' || $category eq 'mcp_probe_timeout'
+    unless $category eq 'mcp' || $category eq 'mcp_probe_timeout' || $stdio_timeout
     || ( $category eq '' && $self->{transport}->is_alive );
 
   my $fallback = await $self->_legacy_handshake($LEGACY_PROTOCOL_VERSIONS[0])
