@@ -1,0 +1,21 @@
+---
+class: standard
+completed: 2026-10-22T01:46:49Z
+created: 2026-10-22T01:28:32Z
+id: 40
+priority: low
+started: 2026-10-22T01:30:57Z
+status: done
+tags:
+- docs
+- skill
+title: 'Skill net-async-mcp-core: Net::Async::MCP::JSONRPC in Modul- und Dateiliste
+  aufnehmen'
+updated: 2026-10-22T01:46:49Z
+---
+
+Mit k30 kam `lib/Net/Async/MCP/JSONRPC.pm` hinzu (gemeinsame Fehlerauswertung für Stdio und HTTP). Die Modul-/Dateiliste und der Fehler-Abschnitt in `.claude/skills/net-async-mcp-core/SKILL.md` kennen es noch nicht.
+
+2026-10-22 01:42 Worker (worktree k30-stdio-error-shape, not committed): .claude/skills/net-async-mcp-core/SKILL.md - JSONRPC row in module map, line in file map, one paragraph on the error shapes under Failure convention, Single-VERSION invariant names JSONRPC as carrying no $VERSION. Repo-owned skill, link count 1, not a hardlinked shared one.
+
+2026-10-22 01:46 Koordinator (perl-developer-fb): geprüft und per Fast-Forward nach main (bis 4e392b5). Suite 590 PASS, raider-MCP-Tests 197 PASS, neue Tests gegen den alten Stand rot.
