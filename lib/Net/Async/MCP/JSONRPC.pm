@@ -1,5 +1,5 @@
 package Net::Async::MCP::JSONRPC;
-# ABSTRACT: How the wire transports read the error of a JSON-RPC response
+# ABSTRACT: How the transports read the error of a JSON-RPC response
 
 use strict;
 use warnings;
@@ -8,12 +8,14 @@ use JSON::MaybeXS;
 
 =head1 DESCRIPTION
 
-The one place the wire transports - L<Net::Async::MCP::Transport::Stdio> and
-L<Net::Async::MCP::Transport::HTTP> - decide whether the C<error> of a decoded
-response is a JSON-RPC error object or something else that only says the
-request failed. What a server writes is foreign input: a shape this client
-cannot read as JSON-RPC must still fail the request, and must never be reached
-into as if it were an object.
+The one place the transports - L<Net::Async::MCP::Transport::Stdio>,
+L<Net::Async::MCP::Transport::HTTP> and
+L<Net::Async::MCP::Transport::InProcess> - decide whether the C<error> of a
+decoded response is a JSON-RPC error object or something else that only says
+the request failed. What a server answers is foreign input, whether it came
+off the wire or from a server object in process: a shape this client cannot
+read as JSON-RPC must still fail the request, and must never be reached into as
+if it were an object.
 
 This is an internal helper of the distribution, not a public API. Both methods
 are class methods.

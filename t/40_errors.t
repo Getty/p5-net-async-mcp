@@ -91,6 +91,81 @@ my $PROTOCOL_MESSAGE = 'MCP error -32602: Unsupported protocol version';
     'and carries no category, so mcp means a server error and nothing else');
 }
 
+# InProcess, a server object answering in shapes JSON-RPC does not have.
+# MCP::Server itself always renders an error object with a code, but this
+# transport takes any object with a handle() method - a subclass, a wrapper, a
+# Mojo::Promise resolving to whatever it was given - so its answer is read with
+# the same care as one off the wire: an "error" that is no error object must
+# neither be reached into, which dies in the caller's face, nor be read as
+# success. Each request names the shape it wants back as its method.
+{
+  package Test::ForeignErrorServer;
+  my %answer = (
+    string         => { error => 'nope' },
+    array          => { error => [ 'nope', 1 ] },
+    number         => { error => 42 },
+    zero           => { error => 0 },
+    no_code        => { error => { message => 'nope' } },
+    null_alone     => { error => undef },
+    null_on_result => { error => undef, result => { ok => 1 } },
+  );
+  sub new { bless {}, shift }
+  sub handle {
+    my ( $self, $request ) = @_;
+    return {
+      jsonrpc => '2.0',
+      id      => $request->{id},
+      %{ $answer{ $request->{method} } },
+    };
+  }
+}
+
+{
+  my $transport = Net::Async::MCP::Transport::InProcess->new(
+    server => Test::ForeignErrorServer->new,
+  );
+
+  # The eval turns a die inside send_request into a failed assertion rather
+  # than the end of the test file.
+  my $answer = sub {
+    my ( $shape ) = @_;
+    my $f = eval { $transport->send_request($shape) };
+    ok($f, 'an answer of shape '.$shape.' does not die') or diag $@;
+    return $f // Future->done;
+  };
+
+  for my $case (
+    [ string  => 'MCP in-process error response: nope',              'a string error' ],
+    [ array   => 'MCP in-process error response: ["nope",1]',        'an array error' ],
+    [ number  => 'MCP in-process error response: 42',                'a number error' ],
+    [ zero    => 'MCP in-process error response: 0',                 'a false number error' ],
+    [ no_code => 'MCP in-process error response: {"message":"nope"}', 'an error object without a code' ],
+  ) {
+    my ( $shape, $message, $what ) = @$case;
+    my $f = $answer->($shape);
+    ok($f->is_failed, 'in process, '.$what.' fails the request');
+    my @failure = $f->is_failed ? $f->failure : ();
+    is($failure[0], $message, $what.' fails with the text it carries');
+    is(scalar @failure, 1,
+      $what.' carries no category, having no error object to hand over');
+  }
+
+  {
+    my $f = $answer->('null_alone');
+    ok($f->is_failed, 'in process, a null error without a result fails the request');
+    my @failure = $f->is_failed ? $f->failure : ();
+    is($failure[0], 'MCP in-process invalid response: a null error and no result',
+      'saying what was missing');
+    is(scalar @failure, 1, 'and carries no category');
+  }
+
+  {
+    my $f = $answer->('null_on_result');
+    ok($f->is_done, 'in process, a null error next to a result is a success');
+    is($f->is_done ? $f->result : undef, { ok => 1 }, 'with that result');
+  }
+}
+
 # Stdio. The response has to come off the wire for this to prove anything, so
 # the subprocess is a JSON-RPC server of three lines that answers every request
 # with the same error.
