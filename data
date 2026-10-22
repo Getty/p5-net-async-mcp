@@ -1,0 +1,35 @@
+---
+class: standard
+completed: 2026-10-22T13:33:59Z
+created: 2026-10-06T19:45:36Z
+id: 32
+priority: low
+started: 2026-10-22T13:32:04Z
+status: done
+tags:
+- stdio
+- async
+- timeout
+- review-2026-10-06
+title: 'Stdio: ein Server, der nicht antwortet oder SIGTERM ignoriert, hängt Request
+  bzw. close für immer'
+updated: 2026-10-22T13:33:59Z
+---
+
+## Befund
+
+- `timeout` und `stall_timeout` sind in `%TRANSPORT_KEYS` nur dem HTTP-Transport zugeordnet (`lib/Net/Async/MCP.pm:150-151`). Über Stdio hat ein Request keinerlei Frist: `send_request` (`Transport/Stdio.pm`, ab `sub send_request`) legt den Future in `pending` und wartet, bis eine Zeile mit der id kommt oder der Prozess endet. Ein Server, der lebt, aber nicht antwortet, hält den Aufrufer unbegrenzt. Ein gesetztes `timeout` wird dabei kommentarlos nicht angewandt.
+- `close` schickt genau ein `SIGTERM` und wartet auf `on_finish` (`Transport/Stdio.pm`, `sub close`). stdin wird vorher nicht geschlossen (das wäre das Shutdown-Signal der Stdio-Bindung), und es gibt keine Eskalation auf `SIGKILL`. Ein Server, der TERM abfängt, lässt den close-Future nie fertig werden, damit auch `Net::Async::MCP->shutdown` nicht.
+
+## Fertig
+
+- `timeout` gilt auch für Stdio-Requests (Future schlägt nach Ablauf fehl, `notifications/cancelled` geht wie beim Cancel hinaus) oder das POD von `timeout` sagt ausdrücklich, dass Stdio keine Frist kennt und wie man sie mit `Future->wait_any` + `loop->timeout_future` selbst setzt.
+- `close`: stdin schließen, kurze Frist, `TERM`, weitere Frist, `KILL`. Der close-Future ist in jedem Fall nach endlicher Zeit fertig.
+- Tests mit einem Server, der `$SIG{TERM} = 'IGNORE'` setzt.
+
+---
+Fleet review 2026-10-06 · kind: improvement · confidence: verified
+
+2026-10-22 00:10 Koordinator (perl-developer-fb): Teil close durch #36 erledigt (stdin schließen, nach 2 s TERM, nach weiteren 2 s KILL). Offen bleibt nur: timeout/stall_timeout gelten weiter nur für HTTP (lib/Net/Async/MCP.pm %TRANSPORT_KEYS), ein Stdio-Request ohne Antwort hängt.
+
+2026-10-22 13:32 Worker (net-async-mcp-worker): timeout gilt jetzt auch für Stdio. Transport/Stdio.pm: timeout-Attribut + Timer pro Request (loop->delay_future, beim Settle per on_ready gestoppt); Ablauf → pending gelöscht, notifications/cancelled {requestId, reason} an den Server, Future fail('MCP stdio request METHOD timed out after Ns', 'timeout') – Kategorie wie Net::Async::HTTP. MCP.pm: %TRANSPORT_KEYS timeout => IO::Async::Notifier (HTTP+Stdio), stall_timeout bleibt HTTP-only. _probe_handshake: stdio-Timeout zählt wie mcp_probe_timeout (Fallback auf initialize), sonst kollidiert ein timeout < discover_timeout mit der Probe. POD timeout/discover_timeout/initialize/Stdio angepasst. Neuer Test t/21_stdio_timeout.t (27 Tests, untracked – muss beim Commit mit hinzu). Close-Teil (#36) geprüft, IGNORE-Test existiert bereits in t/25_legacy.t. prove -lr t: 11 Dateien, 617 Tests grün; dzil test grün (ohne die untracked Datei). Drift für dieses Board: .claude/skills/net-async-mcp-core/SKILL.md sagt noch 'headers, timeout and stall_timeout to HTTP' und listet timeout nicht unter den Fehlerkategorien – eigene Karte.
