@@ -1,0 +1,27 @@
+---
+class: standard
+completed: 2026-10-22T01:46:46Z
+created: 2026-10-22T01:28:27Z
+id: 39
+priority: low
+started: 2026-10-22T01:30:57Z
+status: done
+tags:
+- test
+- http
+title: t/35_http_legacy.t lässt seinen Server laufen, wenn der Testprozess getötet
+  wird
+updated: 2026-10-22T01:46:46Z
+---
+
+## Befund
+
+Wird `t/35_http_legacy.t` abgebrochen (z. B. durch einen Zeit-Cap), bleibt `t/bin/legacy_http_server.pl` als Waise zurück. Beobachtet: PID 1579850 läuft seit 2026-10-19, cwd im gelöschten k36-Worktree.
+
+## Fertig
+
+- Der Testserver endet, wenn der Testprozess stirbt (z. B. Elternprozess-Überwachung / Pipe-EOF / Prozessgruppe).
+
+2026-10-22 01:42 Worker (worktree k30-stdio-error-shape, not committed): t/bin/legacy_http_server.pl exits once its parent is gone (Mojo::IOLoop recurring 0.5s, getppid != LEGACY_HTTP_PARENT). t/35_http_legacy.t passes LEGACY_HTTP_PARENT => $$, because a plain getppid at server start races: a test killed while the server still compiles Mojolicious hands it to PID 1 first (seen in the first attempt). Verified: kill -9 of the test 0s/0.5s after server fork and 2s mid-run -> server gone after 0.8-1.3s; HEAD copy of test+server under the same kill -> server still running after 3s (red). legacy_mcp_server.pl and test_mcp_server.pl need nothing: they end on EOF of the stdin pipe; kill -9 of t/25_legacy.t and t/20_stdio.t mid-run -> servers gone in 0.1-0.4s. Files: t/bin/legacy_http_server.pl, t/35_http_legacy.t. No Changes entry by instruction.
+
+2026-10-22 01:46 Koordinator (perl-developer-fb): geprüft und per Fast-Forward nach main (bis 4e392b5). Suite 590 PASS, raider-MCP-Tests 197 PASS, neue Tests gegen den alten Stand rot.
