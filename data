@@ -1,0 +1,49 @@
+---
+class: standard
+completed: 2026-10-22T01:29:19Z
+created: 2026-10-06T19:45:26Z
+id: 30
+priority: medium
+started: 2026-10-22T01:06:18Z
+status: done
+tags:
+- bug
+- stdio
+- async
+- review-2026-10-06
+title: 'Stdio: fehlgeformtes error-Feld vom Server lässt die Event-Loop sterben'
+updated: 2026-10-22T01:29:27Z
+---
+
+## Befund
+
+`_on_stdout_read` liest eine Fehlerantwort ohne Formprüfung (`lib/Net/Async/MCP/Transport/Stdio.pm:425-427`):
+
+    if (my $err = $response->{error}) {
+      $future->fail("MCP error $err->{code}: $err->{message}", mcp => $err);
+
+Ist `error` kein Objekt, stirbt das unter `strict refs` mitten im `on_read`-Callback, die Ausnahme läuft durch die Loop und der pending-Future wird nie beendet (er wurde davor schon aus `pending` gelöscht).
+
+Nachgestellt mit einem Server, der `{"jsonrpc":"2.0","id":1,"error":"nope"}` antwortet:
+
+    LOOP DIED: Can't use string ("nope") as a HASH ref while "strict refs" in use at lib/Net/Async/MCP/Transport/Stdio.pm line 426.
+
+Ein fremder, fehlerhafter MCP-Server kann so den Prozess des Hosts abreißen. Der HTTP-Transport ist genau dagegen gebaut: `_jsonrpc_error_failure` prüft `ref $err eq 'HASH' && defined $err->{code}` und `_foreign_error_message` fängt den Rest (`Transport/HTTP.pm:1038-1060`). Zweiter Randfall derselben Stelle: `"error": null` ohne `result` wird als Erfolg mit `undef` gemeldet.
+
+## Fertig
+
+- Stdio wertet `error` über dieselbe Formprüfung aus wie HTTP (gemeinsamer Helfer oder gleiche Logik): JSON-RPC-Objekt wird `( $message, mcp => $err )`, alles andere ein Fehlschlag ohne Kategorie mit dem Text, den es trägt.
+- Kein Pfad in `_on_stdout_read` kann mehr aus dem Callback sterben.
+- Test in `t/20_stdio.t` bzw. `t/40_errors.t` mit String-, Array- und null-`error`.
+
+---
+Fleet review 2026-10-06 · kind: bug · confidence: verified
+
+2026-10-22 01:17 Worker progress: tests first in t/40_errors.t (string/array/number/0/hash-without-code/null-alone/null-with-result + loop-survives check) - 20 of 30 new assertions red against HEAD (string/array/number die in on_read; 0 and null-alone reported as success). Fix: new Net::Async::MCP::JSONRPC (error_failure, error_text) shared by Stdio and HTTP; Stdio _settle_response settles every branch. prove -lr t green (563), dzil build + author/release tests green. langertha-raider suite running.
+
+
+2026-10-22 Koordinator-Review: Diff gelesen (JSONRPC-Helfer, Stdio _settle_response, HTTP auf Helfer umgestellt, Encoder jetzt canonical). prove -lr t im Worktree k30-stdio-error-shape: 563 grün. Neuer t/40_errors.t gegen main-HEAD: rot ab Test 16 (string/array/number/zero). Commit-ready -> review.
+
+2026-10-22 01:27 Done, tree commit-ready, not committed. New file lib/Net/Async/MCP/JSONRPC.pm is marked intent-to-add (git add -N) so the git gather of dzil sees it. Fix: Net::Async::MCP::JSONRPC error_failure and error_text, shared by Stdio and HTTP; HTTP _jsonrpc_error_failure and _foreign_error_message now delegate, the only difference being that a structured foreign error is encoded canonically. Stdio _settle_response: JSON-RPC object fails with message and category mcp; any other defined error fails with MCP stdio error response: TEXT and no category; null error next to a result is done; null error alone fails with MCP stdio invalid response: a null error and no result. Red/green: 20 of 30 new assertions in t/40_errors.t red on HEAD, all green now. prove -lr -j3 t: 10 files 563 tests PASS; dzil build plus built t with author and release tests PASS (570). langertha-raider: 227 files plus t/live all PASS, 3 live skips (TEST_LIVE and RAIDER_LIVE_TASKS unset), run in 3 chunks because the 300s cap was hit under host load. DRIFT for this board, dispatcher to file: (1) Transport/InProcess.pm around line 250 reads error->{code} without a shape check, same bug class, should use Net::Async::MCP::JSONRPC too. (2) Transport/HTTP.pm _settle_response and _handle_json_response report error null without result as success with undef, left identical by instruction. (3) skill net-async-mcp-core module and file map lack Net::Async::MCP::JSONRPC. (4) orphan perl t/bin/legacy_http_server.pl, PID 1579850, running since 2026-10-19 with cwd in the deleted k36 worktree: t/35_http_legacy.t leaks its server when the test process is killed; not touched.
+
+Committed as 829b80c, fast-forwarded onto main.
