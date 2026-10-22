@@ -1,0 +1,45 @@
+---
+class: standard
+completed: 2026-10-22T00:10:00Z
+created: 2026-10-06T19:45:31Z
+id: 31
+priority: medium
+started: 2026-10-22T00:10:00Z
+status: done
+tags:
+- bug
+- stdio
+- diagnostics
+- review-2026-10-06
+title: 'Stdio: Server-stderr wird verworfen, und die Exit-Meldung nennt den rohen
+  Wait-Status'
+updated: 2026-10-22T00:10:00Z
+---
+
+## Befund
+
+Zwei Dinge machen einen Startfehler eines Stdio-Servers undiagnostizierbar:
+
+1. Der stderr-Leser wirft alles weg (`lib/Net/Async/MCP/Transport/Stdio.pm:167-173`, `$$buffref = ''`). Es gibt kein Event und keinen Puffer dafür.
+2. `_on_finish` setzt den Wert, den `IO::Async::Process` liefert, unverändert in die Meldung (`Stdio.pm:437-443`). Das ist der rohe Wait-Status (`$?`), nicht der Exit-Code.
+
+Nachgestellt:
+
+    command => ['sh','-c','echo "Can not locate Foo.pm in @INC" >&2; exit 3']
+    # FAILED: MCP server process exited (code 768)
+
+    command => ['/nonexistent/mcp-server']
+    # FAILED: MCP server process exited (code 65280)
+
+Wer sich im Kommando vertippt oder dessen Server beim Laden stirbt, bekommt `code 65280` bzw. `code 768` und sonst nichts.
+
+## Fertig
+
+- Meldung unterscheidet Exit-Code (`$? >> 8`) und Signal (`$? & 127`): `exited with status 3` / `killed by signal 15`.
+- stderr ist erreichbar: ein Event `on_stderr` (über `%TRANSPORT_KEYS` bis zum Client durchgereicht wie `on_notification`) und/oder die letzten Zeilen stderr hängen an der Fehlermeldung, wenn der Prozess mit offenen Requests stirbt. Default ohne Handler darf weiter verwerfen.
+- Tests für beide Fälle in `t/20_stdio.t`; POD von `send_request`/`_on_finish`-Verhalten angepasst.
+
+---
+Fleet review 2026-10-06 · kind: bug · confidence: verified
+
+2026-10-22 00:09 Koordinator (perl-developer-fb): durch #36 erledigt (main seit cc0e757). Nachgestellt mit sh -c '...>&2; exit 3': Meldung 'MCP server process exited (code 3); stderr: Can not locate Foo.pm in @INC', on_stderr bekommt die Zeile. Geschlossen.
