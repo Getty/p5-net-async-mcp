@@ -12,6 +12,8 @@
 #                         body naming only 2027-01-01)
 #   LEGACY_HTTP_SESSION   0 to assign no session id
 #   LEGACY_HTTP_DELETE    the status a DELETE is answered with (default 200)
+#   LEGACY_HTTP_PARENT    the pid of the test; the server exits once it is no
+#                         longer its parent (default: the parent it starts with)
 #
 # Control endpoints for the tests: GET /control/log answers every MCP request
 # received so far - HTTP method, the headers that matter, the body - and POST
@@ -195,4 +197,16 @@ app->log->level('fatal');
 $daemon->start;
 $| = 1;
 print $daemon->ports->[0], "\n";
+
+# The test that started this server stops it, and kills it in an END block -
+# which a test killed by a signal or a timeout never runs. Unlike the stdio
+# servers, which end with the stdin their parent held, nothing here notices
+# the parent going, so the server checks: once it has been handed to another
+# parent, the test is gone and nobody will ever ask it anything again. The
+# test names itself in LEGACY_HTTP_PARENT because a test killed while this
+# server was still compiling has already handed it on before any getppid here
+# could see the original.
+my $parent = $ENV{LEGACY_HTTP_PARENT} // getppid;
+Mojo::IOLoop->recurring(0.5 => sub { exit 0 if getppid != $parent });
+
 Mojo::IOLoop->start;

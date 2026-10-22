@@ -41,7 +41,9 @@ $loop->add($control);
 
 # Every server started, so that none outlives this file however it ends - a
 # server left running holds this file's stderr open, and a harness waiting for
-# it with it.
+# it with it. The END block covers an ending this file sees; for a kill it
+# never sees, each server is told this file's pid and exits once that is no
+# longer its parent.
 my @servers;
 END { kill 'KILL', grep { defined } map { $_->pid } @servers }
 
@@ -52,7 +54,7 @@ sub start_server {
   my $buffer = '';
   my $process = IO::Async::Process->new(
     command => [ $^X, $server_script ],
-    setup   => [ env => { %ENV, %env } ],
+    setup   => [ env => { %ENV, LEGACY_HTTP_PARENT => $$, %env } ],
     stdout  => {
       on_read => sub {
         my ( undef, $buffref ) = @_;
