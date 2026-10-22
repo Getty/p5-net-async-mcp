@@ -66,7 +66,7 @@ on a transport object is that transport's own event and is called with the trans
 | `on_stderr` | no | yes | no |
 | `on_subscription_end` | no | no | yes — the only transport with a stream |
 
-Settings reach a transport only when the caller gave them **and** the transport's class matches: `headers`, `timeout` and `stall_timeout` to HTTP, `env` and `cwd` to Stdio. A setting
+Settings reach a transport only when the caller gave them **and** the transport's class matches: `headers` and `stall_timeout` to HTTP, `env`, `cwd` to Stdio, `timeout` to both wire transports. A setting
 the caller never named is left alone, so the transport's own default survives.
 
 ## Failure convention
@@ -82,7 +82,7 @@ if (($category // '') eq 'mcp') {
 ```
 
 The `mcp` category marks a genuine JSON-RPC error and nothing else; the raw error object travels as the details and the message stays what it was. A failure
-that is no server error carries no category — except `connect` for an HTTP connection that could not be made, `mcp_probe_timeout` for an unanswered stdio probe and `mcp_session_expired` for an
+that is no server error carries no category — except `timeout` for a request that ran out of `timeout` (HTTP and stdio; over stdio the server is sent `notifications/cancelled`, and a timed-out `server/discover` probe counts as no answer), `connect` for an HTTP connection that could not be made, `mcp_probe_timeout` for an unanswered stdio probe and `mcp_session_expired` for an
 ended legacy session.
 
 An `error` is read through `Net::Async::MCP::JSONRPC`, never reached into: only a hash with a defined `code` is a JSON-RPC error. Any other defined `error` — a string, a
