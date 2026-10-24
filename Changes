@@ -1,3 +1,5 @@
+{{$NEXT}}
+
 0.007     2026-10-22 15:43:38Z
   - The client now reaches servers that answer only the initialize handshake
     (the Node and Python SDKs, npx and uvx servers) as well as 2026-07-28

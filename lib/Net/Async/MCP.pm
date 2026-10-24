@@ -9,7 +9,7 @@ use Future::AsyncAwait;
 use Carp qw( croak );
 use Scalar::Util qw( blessed looks_like_number weaken );
 
-our $VERSION = '0.007';
+our $VERSION = '0.008';
 
 =head1 SYNOPSIS
 
