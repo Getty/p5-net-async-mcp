@@ -1,5 +1,8 @@
 package Net::Async::MCP::Transport::HTTP;
 # ABSTRACT: Streamable HTTP MCP transport via Net::Async::HTTP
+
+our $VERSION = '0.008';
+
 use strict;
 use warnings;
 use parent 'IO::Async::Notifier';

@@ -1,6 +1,8 @@
 package Net::Async::MCP::JSONRPC;
 # ABSTRACT: How the transports read the error of a JSON-RPC response
 
+our $VERSION = '0.008';
+
 use strict;
 use warnings;
 

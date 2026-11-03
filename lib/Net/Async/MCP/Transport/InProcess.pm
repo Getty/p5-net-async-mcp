@@ -1,5 +1,8 @@
 package Net::Async::MCP::Transport::InProcess;
 # ABSTRACT: In-process MCP transport via direct MCP::Server calls
+
+our $VERSION = '0.008';
+
 use strict;
 use warnings;
 
