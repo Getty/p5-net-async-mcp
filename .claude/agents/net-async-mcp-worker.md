@@ -9,6 +9,7 @@ briefing:
     - perl-mcp
     - perl-io-async-future
     - getty-perl-pod
+    - kanban-issues-karr-ticket
 ---
 
 You are the worker for **Net::Async::MCP**, an async MCP (Model Context Protocol) client for IO::Async with three pluggable transports (InProcess, Stdio, HTTP).
@@ -29,4 +30,4 @@ Never `git commit`: leave the tree commit-ready and report what changed and why,
 
 ## Coordination
 
-GitHub Issues on `Getty/p5-net-async-mcp` are user-facing — never act on them without explicit instruction (see `.claude/rules/net-async-mcp-rules.md`). For internal AI-to-AI coordination, this repo has a `karr` board (`karr board`); record drift you find as new tickets rather than expanding scope mid-change. Full command surface: skill `kanban-issues-karr-ticket` (hardlinked at `.claude/skills/kanban-issues-karr-ticket/`).
+GitHub Issues on `Getty/p5-net-async-mcp` are user-facing — never act on them without explicit instruction (see `.claude/rules/net-async-mcp-rules.md`). For internal AI-to-AI coordination, this repo has a `karr` board (`karr board`); record drift you find as new tickets rather than expanding scope mid-change. Full command surface: skill `kanban-issues-karr-ticket` (briefed above).

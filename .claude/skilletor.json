@@ -17,6 +17,7 @@
       "getty-perl-pod@karr",
       "getty-perl-release-author-getty@karr",
       "kanban-issues-karr-coordination@karr",
+      "kanban-issues-karr-ticket@karr",
       "perl-io-async-future@getty",
       "perl-mcp@getty",
       "perl-release-dist-ini@getty"
