@@ -29,4 +29,4 @@ skilletor from `.claude/skilletor.json`; `net-async-mcp-core` is owned by this r
 
 Internal AI-to-AI work is coordinated on the repo's `karr` board (`karr board`). GitHub
 Issues on `Getty/p5-net-async-mcp` are a public tracker for real users — never act on one
-without explicit instruction (shared rule `getty-publish-gate`).
+without explicit instruction (shared rule `publish-gate`).
