@@ -2,14 +2,13 @@
 name: net-async-mcp-worker
 description: "Default Net::Async::MCP worker — implement, refactor, debug, and test code in this distribution. Pre-loaded with all Perl/MCP/IO::Async conventions and this repo's architecture, transport boundaries, known gaps and version style. Leaves a commit-ready tree; never commits — commits belong to net-async-mcp-release-manager."
 model: opus
-briefing:
-  skills:
-    - getty-perl-core
-    - net-async-mcp-core
-    - perl-mcp
-    - perl-io-async-future
-    - getty-perl-pod
-    - kanban-issues-karr-ticket
+skills:
+  - getty-perl-core
+  - net-async-mcp-core
+  - perl-mcp
+  - perl-io-async-future
+  - getty-perl-pod
+  - kanban-issues-karr-ticket
 ---
 
 You are the worker for **Net::Async::MCP**, an async MCP (Model Context Protocol) client for IO::Async with three pluggable transports (InProcess, Stdio, HTTP).
